@@ -89,6 +89,15 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/privacy")
+async def privacy_policy():
+    return {
+        "app": "PRA - Patient Relationship Assistant",
+        "privacy_policy": "Patient data collected through this application is used solely for clinic management and patient care purposes. Data is stored securely and not shared with third parties.",
+        "contact": "support@praclinic.in"
+    }
+
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     try:
