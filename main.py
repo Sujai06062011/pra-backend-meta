@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
@@ -122,6 +122,28 @@ async def whatsapp_verify(request: Request):
     params = dict(request.query_params)
     challenge = params.get("hub.challenge", "")
     return PlainTextResponse(challenge)
+
+
+META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "pra_meta_webhook_verify")
+
+
+@app.get("/webhook/meta")
+async def meta_webhook_verify(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    print(f"[Meta Webhook Verify] mode={mode} token={token} challenge={challenge}")
+    if mode == "subscribe" and token == META_WEBHOOK_VERIFY_TOKEN:
+        print("[Meta Webhook] Verified successfully")
+        return PlainTextResponse(challenge)
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.post("/webhook/meta")
+async def meta_webhook_inbound(request: Request):
+    body = await request.json()
+    print(f"[Meta Webhook Inbound] {str(body)[:200]}")
+    return {"status": "ok"}
 
 
 # ── TEST TRIGGER ENDPOINTS ────────────────────────────────
