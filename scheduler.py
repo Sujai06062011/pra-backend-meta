@@ -2,7 +2,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import date, datetime, timedelta
 from supabase import create_client
-from twilio.rest import Client
 from dotenv import load_dotenv
 import os
 import config_loader
@@ -14,26 +13,20 @@ supabase = create_client(
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
-twilio_client = Client(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN")
-)
 
-TWILIO_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
-
-
-def send_whatsapp(to_number: str, message: str):
-    """Send WhatsApp message via Twilio"""
+async def send_whatsapp(to_number: str, message: str):
+    """Send WhatsApp message via Meta Cloud API"""
     try:
-        msg = twilio_client.messages.create(
-            from_=TWILIO_FROM,
-            to=f"whatsapp:+{to_number}",
-            body=message
-        )
-        print(f"✅ Sent to {to_number}: SID {msg.sid}")
-        return True
+        # deferred import: main imports this module at startup
+        from main import send_meta_text
+        result = await send_meta_text(to_number, message)
+        if result.get("messages"):
+            print(f"✅ Sent to {to_number} via Meta")
+            return True
+        print(f"❌ Meta send failed for {to_number}: {result}")
+        return False
     except Exception as e:
-        print(f"❌ Twilio error for {to_number}: {e}")
+        print(f"❌ Meta error for {to_number}: {e}")
         return False
 
 
@@ -207,7 +200,7 @@ async def send_morning_reminders():
 
     for mobile, data in patients_medicines.items():
         message = build_morning_message(mobile, data)
-        send_whatsapp(mobile, message)
+        await send_whatsapp(mobile, message)
         print(f"✅ Morning reminder sent to {data['patient_name']} ({mobile})")
 
 
@@ -230,7 +223,7 @@ async def send_evening_reminders():
 
     for mobile, data in night_patients.items():
         message = build_evening_message(mobile, data)
-        send_whatsapp(mobile, message)
+        await send_whatsapp(mobile, message)
         print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
 
 
@@ -292,7 +285,7 @@ async def send_visit_summary():
                     f"- {_doctor_name}"
                 )
 
-            send_whatsapp(mobile, message)
+            await send_whatsapp(mobile, message)
 
         except Exception as e:
             print(f"❌ Error sending visit summary: {e}")
@@ -356,7 +349,7 @@ async def send_review_requests():
                     f"- {_doctor_name} & Team"
                 )
 
-            send_whatsapp(mobile, message)
+            await send_whatsapp(mobile, message)
 
         except Exception as e:
             print(f"❌ Error sending review request: {e}")

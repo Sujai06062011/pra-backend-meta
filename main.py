@@ -1,19 +1,24 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 import os
-from datetime import date, timedelta
+import httpx
+import json
+import pytz
+from datetime import date, datetime, timedelta
 from collections import defaultdict
 from whatsapp_handler import handle_message
 from scheduler import init_scheduler, reschedule
 from followup import prewarm_response_audios
+from database import supabase, save_conversation_state as upsert_conversation_state
 import config_loader
 
 
 load_dotenv()
+
+IST = pytz.timezone("Asia/Kolkata")
 
 app = FastAPI(title="PRA - Patient Relationship Assistant")
 
@@ -25,12 +30,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-twilio_client = Client(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN")
-)
-
-TWILIO_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
+# ── META CLOUD API (WhatsApp) ─────────────────────────────
+META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
+META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "pra_meta_webhook_verify")
+META_BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}/{META_PHONE_NUMBER_ID}/messages"
 
 
 @app.post("/admin/onboard-clinic")
@@ -67,16 +72,77 @@ async def startup_event():
 
     print("🚀 PRA Backend started with DB-driven scheduler")
 
-def send_whatsapp(to_number: str, message: str):
-    try:
-        msg = twilio_client.messages.create(
-            from_=TWILIO_FROM,
-            to=f"whatsapp:+{to_number}",
-            body=message
-        )
-        print(f"✅ Sent to {to_number}: SID {msg.sid}")
-    except Exception as e:
-        print(f"❌ Twilio error: {e}")
+async def send_meta_text(to_number: str, message: str):
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "text",
+        "text": {"body": message}
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(META_BASE_URL, json=payload, headers=headers)
+        print(f"[Meta TEXT] to={to_number} status={r.status_code} body={r.text}")
+        return r.json()
+
+
+async def send_meta_interactive(to_number: str, body_text: str, buttons: list, footer: str = None):
+    interactive = {
+        "type": "button",
+        "body": {"text": body_text},
+        "action": {
+            "buttons": [
+                {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                for b in buttons[:3]
+            ]
+        }
+    }
+    if footer:
+        interactive["footer"] = {"text": footer}
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "interactive",
+        "interactive": interactive
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(META_BASE_URL, json=payload, headers=headers)
+        print(f"[Meta INTERACTIVE] to={to_number} status={r.status_code} body={r.text}")
+        return r.json()
+
+
+async def send_meta_template(to_number: str, template_name: str, lang_code: str = "en", components: list = None):
+    template = {"name": template_name, "language": {"code": lang_code}}
+    if components:
+        template["components"] = components
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "template",
+        "template": template
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(META_BASE_URL, json=payload, headers=headers)
+        print(f"[Meta TEMPLATE] to={to_number} template={template_name} status={r.status_code} body={r.text}")
+        return r.json()
+
+
+async def handle_inbound_message(from_number: str, text: str, to_number: str = ""):
+    """Run the conversation engine on an inbound Meta text and reply via Meta"""
+    reply = await handle_message(from_number, text, to_number, "")
+    if reply:
+        await send_meta_text(from_number, reply)
 
 
 @app.get("/")
@@ -115,7 +181,7 @@ async def whatsapp_webhook(request: Request):
         reply = await handle_message(from_number, body, to_number, media_url)
         print(f"💬 Reply: {reply[:80]}...")
 
-        send_whatsapp(from_number, reply)
+        await send_meta_text(from_number, reply)
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -133,9 +199,6 @@ async def whatsapp_verify(request: Request):
     return PlainTextResponse(challenge)
 
 
-META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "pra_meta_webhook_verify")
-
-
 @app.get("/webhook/meta")
 async def meta_webhook_verify(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -151,7 +214,87 @@ async def meta_webhook_verify(request: Request):
 @app.post("/webhook/meta")
 async def meta_webhook_inbound(request: Request):
     body = await request.json()
-    print(f"[Meta Webhook Inbound] {str(body)[:200]}")
+    print(f"[Meta Inbound] {json.dumps(body)[:500]}")
+    try:
+        entry = body["entry"][0]
+        value = entry["changes"][0]["value"]
+
+        if "statuses" in value and "messages" not in value:
+            return {"status": "ok"}
+
+        messages = value.get("messages", [])
+        if not messages:
+            return {"status": "ok"}
+
+        msg = messages[0]
+        from_number = msg["from"]
+        msg_type = msg["type"]
+        clinic_number = value.get("metadata", {}).get("display_phone_number", "")
+
+        if msg_type == "text":
+            text = msg["text"]["body"].strip()
+            print(f"[Meta TEXT IN] from={from_number} text={text}")
+            await handle_inbound_message(from_number, text, clinic_number)
+
+        elif msg_type == "interactive":
+            button_id = msg["interactive"]["button_reply"]["id"]
+            print(f"[Meta BUTTON] from={from_number} id={button_id}")
+            parts = button_id.split("__", 1)
+            action = parts[0]
+            followup_id = parts[1] if len(parts) > 1 else None
+
+            if followup_id:
+                if action == "ok":
+                    supabase.table("followups").update({
+                        "call_status": "Completed", "response": "Better"
+                    }).eq("id", followup_id).execute()
+                    await send_meta_text(from_number,
+                        "Great to hear! Wishing continued good health. Take care! 🌟\n"
+                        "— Dr. Kumar Child Care Clinic")
+
+                elif action == "recovering":
+                    supabase.table("followups").update({
+                        "call_status": "Completed", "response": "Same"
+                    }).eq("id", followup_id).execute()
+                    original = supabase.table("followups").select("*").eq(
+                        "id", followup_id).single().execute().data
+                    new_date = (datetime.now(IST) + timedelta(days=3)).date().isoformat()
+                    supabase.table("followups").insert({
+                        "patient_id": original["patient_id"],
+                        "visit_id": original["visit_id"],
+                        "doctor_id": original["doctor_id"],
+                        "scheduled_date": new_date,
+                        "call_status": "Pending",
+                        "followup_day": (original.get("followup_day") or 1) + 1,
+                        "channel": "call"
+                    }).execute()
+                    await send_meta_text(from_number,
+                        "Understood! We'll check in again in 3 days. "
+                        "Rest well and follow the prescription. 🙏\n"
+                        "— Dr. Kumar Child Care Clinic")
+
+                elif action == "appt":
+                    supabase.table("followups").update({
+                        "call_status": "Completed", "response": "Worse"
+                    }).eq("id", followup_id).execute()
+                    original = supabase.table("followups").select(
+                        "*, patients(name, language)"
+                    ).eq("id", followup_id).single().execute().data
+                    patient_name = original["patients"]["name"]
+                    patient_id = original["patient_id"]
+                    upsert_conversation_state(from_number, "awaiting_booking_date", {
+                        "patient_id": patient_id,
+                        "patient_name": patient_name,
+                        "doctor_id": "8c33abe0-5d2e-4613-9437-c7c375e8d162"
+                    })
+                    await send_meta_text(from_number,
+                        f"We'll book an appointment for {patient_name}. "
+                        f"What date works for you? (e.g. 15 Jun or tomorrow)")
+
+    except Exception as e:
+        print(f"[Meta Webhook ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
     return {"status": "ok"}
 
 
@@ -403,8 +546,7 @@ async def write_prescription(request: Request):
             msg += f"\n\nFollow-up in 3 days if not improving.\nReply MENU for any help."
 
         if mobile:
-            from scheduler import send_whatsapp as _wa
-            _wa(mobile, msg)
+            await send_meta_text(mobile, msg)
             whatsapp_sent = True
 
     except Exception as we:
@@ -654,8 +796,7 @@ async def register_patient(request: Request):
     send_to = mobile_raw or (fhm.lstrip("+") if fhm else "")
     if send_to:
         try:
-            from scheduler import send_whatsapp as _wa
-            _wa(send_to, msg)
+            await send_meta_text(send_to, msg)
             wa_sent = True
         except Exception as e:
             print(f"❌ WhatsApp welcome failed: {e}")
@@ -961,8 +1102,7 @@ async def update_prescription(prescription_id: str, request: Request):
             msg += f"\n\nFollow-up in 3 days if not improving.\nReply MENU for any help."
 
         if mobile:
-            from scheduler import send_whatsapp as _wa
-            _wa(mobile, msg)
+            await send_meta_text(mobile, msg)
             whatsapp_sent = True
 
     except Exception as we:
@@ -1199,8 +1339,7 @@ async def send_prescription_whatsapp(prescription_id: str):
                 msg += f"\n⚠️ Precautions: {precautions_text}"
             msg += f"\n\nFollow-up in 7 days.\nReply MENU for any help."
 
-        from scheduler import send_whatsapp as _wa
-        _wa(mobile, msg)
+        await send_meta_text(mobile, msg)
 
         db.table("prescriptions").update({"whatsapp_sent": True}).eq("id", prescription_id).execute()
 
@@ -1282,7 +1421,7 @@ async def answer_query(query_id: str, request: Request):
                     f"*Dr. Kumar's reply:* _{reply_text}_\n\n"
                     f"Reply MENU for main menu."
                 )
-                send_whatsapp(mobile, msg)
+                await send_meta_text(mobile, msg)
                 print(f"✅ WhatsApp reply sent for query {query_id} to {mobile}")
             else:
                 print(f"⚠️ No mobile found for patient {patient_id}, skipping WhatsApp")
@@ -1525,8 +1664,7 @@ async def book_appointment(request: Request):
     wa_sent = False
     if pat_mob:
         try:
-            from scheduler import send_whatsapp as _wa
-            _wa(pat_mob, msg)
+            await send_meta_text(pat_mob, msg)
             wa_sent = True
         except Exception as e:
             print(f"❌ WhatsApp booking confirmation failed: {e}")
@@ -1537,3 +1675,20 @@ async def book_appointment(request: Request):
         "patient_name":   pat_name,
         "whatsapp_sent":  wa_sent,
     }
+
+
+@app.post("/test/meta-interactive")
+async def test_meta_interactive(request: Request):
+    body = await request.json()
+    to = body.get("to", "919047099959")
+    result = await send_meta_interactive(
+        to,
+        "Test from PRA! How is Aadhira feeling?\n🏥 Dr. Kumar Child Care Clinic",
+        [
+            {"id": "ok__test-followup-123", "title": "Doing well"},
+            {"id": "recovering__test-followup-123", "title": "Still recovering"},
+            {"id": "appt__test-followup-123", "title": "Needs appointment"}
+        ],
+        footer="Dr. Kumar Child Care Clinic"
+    )
+    return result

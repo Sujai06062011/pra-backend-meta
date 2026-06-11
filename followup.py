@@ -33,12 +33,11 @@ twilio_client = Client(
     os.getenv("TWILIO_AUTH_TOKEN")
 )
 
-TWILIO_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 TWILIO_VOICE_NUMBER = os.getenv("TWILIO_VOICE_NUMBER")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://web-production-e5f38.up.railway.app")
+BASE_URL = os.getenv("BASE_URL", "https://web-production-a0717.up.railway.app")
 BUCKET_NAME = "clinic-audio"
 
 # Language config for Sarvam AI
@@ -331,11 +330,8 @@ async def send_followup_whatsapp(pres: dict):
     )
 
     try:
-        twilio_client.messages.create(
-            from_=TWILIO_FROM,
-            to=f"whatsapp:+{mobile}",
-            body=message
-        )
+        from main import send_meta_text
+        await send_meta_text(mobile, message)
 
         supabase.table("prescriptions").update({
             "followup_whatsapp_sent": True,
@@ -406,7 +402,7 @@ def get_pending_followups():
     result = supabase.table("followups").select(
         "id, scheduled_date, channel, call_status, patient_id, doctor_id, visit_id, "
         "patients(id, name, mobile, language), "
-        "visits(diagnosis)"
+        "visits(diagnosis, created_at)"
     ).eq("call_status", "Pending").lte("scheduled_date", today_ist).execute()
 
     rows = result.data or []
@@ -443,45 +439,49 @@ def get_followups_needing_call():
 
 
 async def send_followup_whatsapp_from_followups(followup: dict):
-    """Send follow-up WhatsApp message based on followups table row"""
+    """Send interactive follow-up WhatsApp (Meta) based on followups table row"""
     patient = followup.get("patients") or {}
     visit = followup.get("visits") or {}
     patient_name = patient.get("name", "Patient")
     mobile = patient.get("mobile", "")
-    language = patient.get("language", "english")
-    diagnosis = visit.get("diagnosis", "")
 
     if not mobile:
         print(f"⚠️ No mobile for followup {followup['id']}")
         return
 
-    # Use config_loader for clinic name (avoids extra DB query per followup)
-    doctor_id = followup.get("doctor_id", "")
-    clinic_name = config_loader.clinic_name(doctor_id) if doctor_id else config_loader.clinic_name()
-
-    # Try DB template first, fall back to LANGUAGE_CONFIG hardcoded
-    message = config_loader.get_template(
-        "followup_whatsapp", language,
-        {"name": patient_name, "clinic": clinic_name},
-        doctor_id or config_loader.DOCTOR_ID
-    )
-    if not message:
-        config = LANGUAGE_CONFIG.get(language, LANGUAGE_CONFIG["english"])
-        message = config["whatsapp"].format(name=patient_name, clinic=clinic_name)
+    # Visit date for the message: visit created_at, falling back to scheduled_date
+    visit_date = followup.get("scheduled_date", "")
+    try:
+        visit_created = visit.get("created_at", "")
+        if visit_created:
+            visit_date = datetime.fromisoformat(
+                visit_created.replace("Z", "+00:00")
+            ).strftime("%d %b %Y")
+    except Exception:
+        pass
 
     try:
-        twilio_client.messages.create(
-            from_=TWILIO_FROM,
-            to=f"whatsapp:+{mobile}",
-            body=message
+        from main import send_meta_interactive
+
+        followup_id = str(followup["id"])
+        body_text = (
+            f"Hi! How is {patient_name} feeling after the visit on "
+            f"{visit_date}?\n🏥 Dr. Kumar Child Care Clinic"
         )
+        buttons = [
+            {"id": f"ok__{followup_id}", "title": "Doing well"},
+            {"id": f"recovering__{followup_id}", "title": "Still recovering"},
+            {"id": f"appt__{followup_id}", "title": "Needs appointment"}
+        ]
+        await send_meta_interactive(mobile, body_text, buttons,
+            footer="Dr. Kumar Child Care Clinic")
 
         # Mark followup as Whatsapp-Sent so voice call job picks it up next
-        supabase.table("followups").update({
-            "call_status": "Whatsapp-Sent",
-        }).eq("id", followup["id"]).execute()
+        supabase.table("followups").update(
+            {"call_status": "Whatsapp-Sent"}
+        ).eq("id", followup_id).execute()
 
-        print(f"✅ Follow-up WhatsApp sent to {patient_name} ({mobile})")
+        print(f"✅ Follow-up WhatsApp (interactive) sent to {patient_name} ({mobile})")
 
     except Exception as e:
         print(f"❌ Error sending follow-up WhatsApp to {patient_name}: {e}")
@@ -659,11 +659,8 @@ async def handle_voice_followup_response(request: Request):
                     else:
                         booking_msg = f"Hi {patient_name}! The doctor recommends a follow-up appointment. Reply ‘1’ to book."
 
-                    twilio_client.messages.create(
-                        from_=TWILIO_FROM,
-                        to=f"whatsapp:+{mobile}",
-                        body=booking_msg
-                    )
+                    from main import send_meta_text
+                    await send_meta_text(mobile, booking_msg)
 
                     # Reset conversation state so patient can reply '1' to book
                     supabase.rpc("upsert_conversation_state", {"p_mobile": mobile}).execute()
