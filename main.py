@@ -910,10 +910,23 @@ async def queue_status(doctor_id: str, date: str = ""):
 
     appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).order("token_number", desc=False).execute()
     all_appts = appts.data or []
+
+    # current_token = token being served right now (0 = queue not started).
+    # An appointment is "In Progress" only when its token == current_token.
+    for a in all_appts:
+        t = a.get("token_number") or 0
+        if a.get("status") == "Cancelled":
+            a["queue_status"] = "Cancelled"
+        elif current and t == current:
+            a["queue_status"] = "In Progress"
+        elif t and t < current:
+            a["queue_status"] = "Done"
+        else:
+            a["queue_status"] = "Waiting"
+
     confirmed = [a for a in all_appts if a.get("status") == "Confirmed"]
-    # current_token = last token called; in-progress = current+1; done = ≤ current; waiting = > current+1
-    seen    = [a for a in confirmed if (a.get("token_number") or 0) <= current]
-    waiting = [a for a in confirmed if (a.get("token_number") or 0) > current + 1]
+    seen    = [a for a in confirmed if (a.get("token_number") or 0) < current]
+    waiting = [a for a in confirmed if (a.get("token_number") or 0) > current]
 
     return {
         "current_token": current,
@@ -1608,6 +1621,10 @@ async def book_appointment(request: Request):
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="Appointment insert failed")
     appt_id = ins.data[0]["id"]
+
+    # Ensure the day's queue session row exists (tokens table)
+    from database import ensure_queue_session
+    ensure_queue_session(doctor_id, appt_date)
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()

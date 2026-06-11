@@ -555,53 +555,59 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── QUEUE STATUS ──────────────────────────────────────────
     elif intent == "queue":
-        queue = get_queue_status(doctor_id)
-        if queue:
-            last_done       = queue["current_token"]        # last token marked Done
-            in_progress     = last_done + 1                 # token currently being served
-            total           = queue["total_tokens"]
-            avg             = queue.get("avg_minutes_per_patient", 10)
+        import pytz
+        today_ist = datetime.now(pytz.timezone("Asia/Kolkata")).date().isoformat()
 
-            family_tokens = get_family_tokens_today(from_number, doctor_id, in_progress)
-            waiting = [t for t in family_tokens if t["queue_status"] == "Waiting"]
+        # Queue is active if appointments exist today — tokens session row is optional
+        appts_res = _supa.table("appointments").select(
+            "token_number, status, patient_id"
+        ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).neq(
+            "status", "Cancelled"
+        ).order("token_number").execute()
+        todays_appts = appts_res.data or []
 
-            if family_tokens:
-                if waiting:
-                    token_lines = "\n".join(
-                        f"  #{t['token_number']} - {t['name']} (Waiting)"
-                        for t in waiting
-                    )
-                    # Estimate wait based on first waiting token
-                    first_wait = waiting[0]["token_number"] - in_progress
-                    wait_mins  = first_wait * avg
-                    reply = (
-                        f"{clinic_name} - Live Queue 🏥\n\n"
-                        f"Now Serving: #{in_progress}\n\n"
-                        f"Your tokens today:\n{token_lines}\n\n"
-                        f"Est. Wait: ~{wait_mins} mins"
-                        + MENU_HINT
-                    )
-                else:
-                    reply = (
-                        f"{clinic_name} - Live Queue 🏥\n\n"
-                        f"Now Serving: #{in_progress}\n\n"
-                        f"All your appointments for today are completed."
-                        + MENU_HINT
-                    )
-            else:
-                reply = (
-                    f"{clinic_name} - Live Queue 🏥\n\n"
-                    f"Now Serving: #{in_progress}\n"
-                    f"Total Today: {total}\n\n"
-                    f"You do not have an appointment today.\n"
-                    f"Reply 1 to book an appointment."
-                    + MENU_HINT
-                )
-        else:
+        if not todays_appts:
             reply = (
                 f"Queue not started yet today. Clinic opens at 9:00 AM.\n\n"
                 f"Reply 1 to book an appointment."
             )
+        else:
+            tok_res = _supa.table("tokens").select("current_token").eq(
+                "doctor_id", doctor_id
+            ).eq("queue_date", today_ist).execute()
+            current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
+
+            # Patient's earliest token today (self + family members)
+            own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
+            fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()
+            my_ids = {p["id"] for p in (own.data or []) + (fam.data or [])}
+
+            my_tokens = sorted(
+                a["token_number"] for a in todays_appts
+                if a["patient_id"] in my_ids and a.get("token_number")
+            )
+
+            if not my_tokens:
+                reply = (
+                    "You have no appointment today.\n"
+                    "Reply 1 to book an appointment."
+                )
+            else:
+                patient_token = my_tokens[0]
+                ahead_count = sum(
+                    1 for a in todays_appts
+                    if a.get("status") == "Confirmed"
+                    and current_token < (a.get("token_number") or 0) < patient_token
+                )
+                wait_mins = ahead_count * 15
+                reply = (
+                    f"🏥 {clinic_name} - Live Queue\n\n"
+                    f"Current Token: {current_token}\n"
+                    f"Your Token: #{patient_token}\n"
+                    f"Patients ahead: {ahead_count}\n"
+                    f"Est. Wait: ~{wait_mins} mins\n\n"
+                    f"Reply MENU for main menu"
+                )
 
     # ── CANCEL APPOINTMENT ────────────────────────────────────
     elif intent == "cancel":

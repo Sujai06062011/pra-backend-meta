@@ -156,6 +156,29 @@ def get_next_token(doctor_id: str, date_str: str):
     return 1
 
 
+def ensure_queue_session(doctor_id: str, queue_date: str):
+    """Create the day's tokens session row on first booking, bump total_tokens after.
+    Emulates: INSERT ... ON CONFLICT (doctor_id, queue_date) DO UPDATE total_tokens+1"""
+    try:
+        existing = supabase.table("tokens").select("total_tokens").eq(
+            "doctor_id", doctor_id).eq("queue_date", queue_date).execute()
+        if existing.data:
+            supabase.table("tokens").update({
+                "total_tokens": (existing.data[0].get("total_tokens") or 0) + 1,
+                "is_active": True
+            }).eq("doctor_id", doctor_id).eq("queue_date", queue_date).execute()
+        else:
+            supabase.table("tokens").insert({
+                "doctor_id": doctor_id,
+                "queue_date": queue_date,
+                "current_token": 0,
+                "total_tokens": 1,
+                "is_active": True
+            }).execute()
+    except Exception as e:
+        print(f"⚠️ ensure_queue_session failed for {queue_date}: {e}")
+
+
 def create_appointment(patient_id: str, doctor_id: str, date_str: str,
                        time_str: str, token: int):
     """Create a new appointment"""
@@ -168,6 +191,7 @@ def create_appointment(patient_id: str, doctor_id: str, date_str: str,
         "status": "Confirmed",
         "booking_source": "whatsapp"
     }).execute()
+    ensure_queue_session(doctor_id, date_str)
     return result.data[0] if result.data else None
 
 
