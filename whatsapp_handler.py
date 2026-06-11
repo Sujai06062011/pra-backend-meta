@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import re
 from database import (
     get_doctor_by_whatsapp, get_patient_by_mobile, get_conversation_state,
@@ -83,6 +83,34 @@ def get_all_linked_patients(mobile: str) -> list:
         f"mobile.eq.{mobile},family_head_mobile.eq.{mobile}"
     ).order("created_at", desc=False).execute()
     return result.data or []
+
+
+def filter_patients_with_active_prescriptions(patients: list) -> list:
+    """Keep only patients who have a prescription whose medicine course is still running."""
+    if not patients:
+        return []
+    import pytz
+    today = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+    ids = [p["id"] for p in patients]
+    res = _supa.table("prescriptions").select(
+        "patient_id, prescription_date, prescription_medicines(duration_days)"
+    ).in_("patient_id", ids).execute()
+
+    active_ids = set()
+    for pres in (res.data or []):
+        pres_date_str = pres.get("prescription_date") or ""
+        if not pres_date_str:
+            continue
+        try:
+            pres_date = datetime.strptime(pres_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        for med in pres.get("prescription_medicines") or []:
+            duration = med.get("duration_days") or 1
+            if pres_date + timedelta(days=duration - 1) >= today:
+                active_ids.add(pres["patient_id"])
+                break
+    return [p for p in patients if p["id"] in active_ids]
 
 
 def build_patient_select_msg(patients: list) -> str:
@@ -682,23 +710,34 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── ASK DOCTOR A QUESTION ─────────────────────────────────
     elif intent == "ask_question":
         all_patients = get_all_linked_patients(from_number)
+        active_patients = filter_patients_with_active_prescriptions(all_patients)
 
-        if len(all_patients) == 1:
+        if not active_patients:
             reply = (
-                "Please type your question for Dr. Kumar.\n\n"
+                "None of the patients registered under your number have an "
+                "active prescription right now.\n\n"
+                "Questions to the doctor can be asked during an ongoing treatment.\n"
+                "Reply 1 to book an appointment."
+                + MENU_HINT
+            )
+            new_state = "idle"
+        elif len(active_patients) == 1:
+            p = active_patients[0]
+            reply = (
+                f"Please type your question for Dr. Kumar about {p['name']}.\n\n"
                 "Our doctor will reply within a few hours. 💬"
             )
             new_state = "awaiting_query"
-            new_temp  = {"query_patient_id": all_patients[0]["id"]}
+            new_temp  = {"query_patient_id": p["id"]}
         else:
             lines = "Your question is for which patient?\n\n"
-            for i, p in enumerate(all_patients, 1):
+            for i, p in enumerate(active_patients, 1):
                 code = f" ({p['patient_code']})" if p.get("patient_code") else ""
                 lines += f"{i}. {p['name']}{code}\n"
             lines += "\nReply with a number."
             reply     = lines
             new_state = "awaiting_query_patient_select"
-            new_temp  = {"query_patients": all_patients}
+            new_temp  = {"query_patients": active_patients}
 
     elif intent == "query_patient_selected":
         _patients = temp_data.get("query_patients", [])
