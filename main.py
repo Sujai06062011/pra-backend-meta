@@ -610,7 +610,7 @@ if __name__ == "__main__":
 @app.get("/dashboard/stats")
 async def dashboard_stats(doctor_id: str):
     from database import supabase
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
 
     today_appts = supabase.table("appointments").select("id", count="exact").eq("doctor_id", doctor_id).eq("appointment_date", today).neq("status", "Cancelled").execute()
     # tokens uses queue_date, not appointment_date
@@ -620,21 +620,32 @@ async def dashboard_stats(doctor_id: str):
     total_patients = all_patients.count or 0
     # followups table (no underscore), filter by call_status not status
     pending_followups = supabase.table("followups").select("id", count="exact").eq("doctor_id", doctor_id).is_("completed_at", "null").execute()
-    # completed = tokens seen today (current_token tracks last done token number)
     current_token_val = token_row.data[0]["current_token"] if token_row.data else 0
-    today_completed_count = current_token_val
 
-    # Display token (M1/E1…) for the token being served
+    # Completed/serving derived from appointment statuses + slot-time order,
+    # same rule as /queue/status (current_token alone resets to 0 at day end)
+    day_rows = supabase.table("appointments").select(
+        "token_number, appointment_time, status"
+    ).eq("doctor_id", doctor_id).eq("appointment_date", today).execute().data or []
+
+    curr = next((a for a in day_rows if current_token_val and a.get("token_number") == current_token_val), None)
+    serving_time = _time_str(curr.get("appointment_time")) if curr else ""
+
+    def _is_done(a):
+        if a.get("status") == "Completed":
+            return True
+        if a.get("status") == "Cancelled":
+            return False
+        t = _time_str(a.get("appointment_time"))
+        return bool(serving_time and t and t < serving_time)
+
+    today_completed_count = sum(1 for a in day_rows if _is_done(a))
+
     current_display_token = None
-    if current_token_val:
-        day_rows = supabase.table("appointments").select(
-            "token_number, appointment_time, status"
-        ).eq("doctor_id", doctor_id).eq("appointment_date", today).execute().data or []
-        curr = next((a for a in day_rows if a.get("token_number") == current_token_val), None)
-        if curr:
-            current_display_token = get_display_token(
-                current_token_val, curr.get("appointment_time"), day_rows
-            )
+    if curr:
+        current_display_token = get_display_token(
+            current_token_val, curr.get("appointment_time")
+        )
 
     week_map = defaultdict(int)
     for i in range(6, -1, -1):
@@ -923,7 +934,7 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
 @app.get("/appointments/today")
 async def today_appointments(doctor_id: str):
     from database import supabase
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
     result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).order("appointment_time", desc=False).execute()
     return _annotate_display_tokens(result.data or [], doctor_id)
 
