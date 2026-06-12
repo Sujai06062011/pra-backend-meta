@@ -584,57 +584,101 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── QUEUE STATUS ──────────────────────────────────────────
     elif intent == "queue":
         import pytz
-        today_ist = datetime.now(pytz.timezone("Asia/Kolkata")).date().isoformat()
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata"))
+        today_ist = now_ist.date().isoformat()
 
-        # Queue is active if appointments exist today — tokens session row is optional
-        appts_res = _supa.table("appointments").select(
-            "token_number, status, patient_id"
-        ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).neq(
-            "status", "Cancelled"
-        ).order("token_number").execute()
-        todays_appts = appts_res.data or []
+        # 1. Current token from tokens session row (0 = not started)
+        tok_res = _supa.table("tokens").select("current_token").eq(
+            "doctor_id", doctor_id
+        ).eq("queue_date", today_ist).execute()
+        current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
 
-        if not todays_appts:
+        # 2. ALL of this mobile's appointments today (self + family members)
+        own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
+        fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()
+        my_ids = list({p["id"] for p in (own.data or []) + (fam.data or [])})
+
+        my_appts = []
+        if my_ids:
+            appts_res = _supa.table("appointments").select(
+                "token_number, status, appointment_time, patient_id, patients(name)"
+            ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).neq(
+                "status", "Cancelled"
+            ).in_("patient_id", my_ids).order("token_number").execute()
+            my_appts = appts_res.data or []
+
+        if not my_appts:
             reply = (
-                f"Queue not started yet today. Clinic opens at 9:00 AM.\n\n"
-                f"Reply 1 to book an appointment."
+                "You have no appointment today.\n"
+                "Reply 1 to book an appointment."
             )
         else:
-            tok_res = _supa.table("tokens").select("current_token").eq(
-                "doctor_id", doctor_id
-            ).eq("queue_date", today_ist).execute()
-            current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
+            def appt_hour(a):
+                try:
+                    return int((a.get("appointment_time") or "")[:2])
+                except ValueError:
+                    return 9  # no time stored → treat as morning
 
-            # Patient's earliest token today (self + family members)
-            own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
-            fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()
-            my_ids = {p["id"] for p in (own.data or []) + (fam.data or [])}
+            def appt_name(a):
+                return (a.get("patients") or {}).get("name", "Patient")
 
-            my_tokens = sorted(
-                a["token_number"] for a in todays_appts
-                if a["patient_id"] in my_ids and a.get("token_number")
-            )
+            def appt_time_display(a):
+                t = (a.get("appointment_time") or "")[:5]
+                try:
+                    return format_time(t)
+                except Exception:
+                    return t
 
-            if not my_tokens:
+            # 3. Split by session: morning < 13:00 ≤ evening
+            morning = [a for a in my_appts if appt_hour(a) < 13]
+            evening = [a for a in my_appts if appt_hour(a) >= 13]
+
+            if now_ist.hour < 13:
+                active_appointments   = morning
+                upcoming_appointments = evening
+            else:
+                active_appointments   = evening
+                upcoming_appointments = []  # morning session already over
+
+            if active_appointments:
+                lines = [f"🏥 {clinic_name} - Live Queue\n"]
+                lines.append(f"Current Token: {current_token}\n")
+                for a in active_appointments:
+                    token = a.get("token_number") or 0
+                    if a.get("status") == "In Progress" or (current_token and token == current_token):
+                        status_text = "🟢 Now being seen"
+                    elif a.get("status") == "Completed" or (token and token < current_token):
+                        status_text = "✅ Done"
+                    else:  # Confirmed / waiting
+                        tokens_ahead = max(0, token - current_token - 1)
+                        status_text = f"⏳ ~{tokens_ahead * 15} mins wait"
+                    lines.append(f"#{token} {appt_name(a)} → {status_text}")
+
+                if upcoming_appointments:
+                    lines.append("\nEvening session:")
+                    for a in upcoming_appointments:
+                        lines.append(
+                            f"#{a.get('token_number')} {appt_name(a)} → "
+                            f"Starts at {appt_time_display(a)}"
+                        )
+
+                lines.append("\nReply MENU for main menu")
+                reply = "\n".join(lines)
+            elif upcoming_appointments:
+                # All morning done, evening not started yet
                 reply = (
-                    "You have no appointment today.\n"
-                    "Reply 1 to book an appointment."
+                    "Morning session completed.\n\n"
+                    "Your evening appointments:\n"
+                    + "\n".join(
+                        f"#{a.get('token_number')} {appt_name(a)} → {appt_time_display(a)}"
+                        for a in upcoming_appointments
+                    )
+                    + "\n\nReply MENU for main menu"
                 )
             else:
-                patient_token = my_tokens[0]
-                ahead_count = sum(
-                    1 for a in todays_appts
-                    if a.get("status") == "Confirmed"
-                    and current_token < (a.get("token_number") or 0) < patient_token
-                )
-                wait_mins = ahead_count * 15
                 reply = (
-                    f"🏥 {clinic_name} - Live Queue\n\n"
-                    f"Current Token: {current_token}\n"
-                    f"Your Token: #{patient_token}\n"
-                    f"Patients ahead: {ahead_count}\n"
-                    f"Est. Wait: ~{wait_mins} mins\n\n"
-                    f"Reply MENU for main menu"
+                    "All your appointments for today are completed. ✅\n\n"
+                    "Reply MENU for main menu"
                 )
 
     # ── CANCEL APPOINTMENT ────────────────────────────────────
