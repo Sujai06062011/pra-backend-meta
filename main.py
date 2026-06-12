@@ -909,9 +909,11 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
         t = _time_str(a.get("appointment_time"))
         if a.get("status") == "Cancelled":
             a["queue_status"] = "Cancelled"
+        elif a.get("status") == "Completed":
+            a["queue_status"] = "Done"
         elif (cur and a.get("token_number") == cur) or a.get("status") == "In Progress":
             a["queue_status"] = "In Progress"
-        elif a.get("status") == "Completed" or (st and t and t < st):
+        elif st and t and t < st:
             a["queue_status"] = "Done"
         else:
             a["queue_status"] = "Waiting"
@@ -981,9 +983,11 @@ async def queue_status(doctor_id: str, date: str = ""):
         t = _time_str(a.get("appointment_time"))
         if a.get("status") == "Cancelled":
             a["queue_status"] = "Cancelled"
+        elif a.get("status") == "Completed":
+            a["queue_status"] = "Done"
         elif (current and a.get("token_number") == current) or a.get("status") == "In Progress":
             a["queue_status"] = "In Progress"
-        elif a.get("status") == "Completed" or (serving_time and t and t < serving_time):
+        elif serving_time and t and t < serving_time:
             a["queue_status"] = "Done"
         else:
             a["queue_status"] = "Waiting"
