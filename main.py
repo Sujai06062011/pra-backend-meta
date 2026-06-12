@@ -1623,12 +1623,12 @@ async def get_appointment_slots(doctor_id: str, date: str):
 
     all_slots = gen_slots(start_m, end_m) + gen_slots(start_e, end_e)
 
-    # Count active bookings for each slot (Cancelled rows free the slot)
+    # Count occupied slots — only Cancelled frees a slot
     appts_res = supabase.table("appointments")\
         .select("appointment_time")\
         .eq("doctor_id", doctor_id)\
         .eq("appointment_date", date)\
-        .in_("status", ["Confirmed", "In Progress"])\
+        .in_("status", ["Confirmed", "In Progress", "Completed"])\
         .execute()
     booked_counts: dict[str, int] = {}
     for a in (appts_res.data or []):

@@ -219,13 +219,14 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None)
 
 
 def is_slot_available(doctor_id: str, appointment_date: str, appointment_time) -> bool:
-    """A slot is free unless a Confirmed/In Progress appointment occupies it.
-    Cancelled appointments free the slot."""
+    """A slot is free unless a Confirmed/In Progress/Completed appointment
+    occupies it — only Cancelled frees the slot (a Completed slot reopening
+    would mint duplicate display tokens)."""
     result = supabase.table("appointments").select("id").eq(
         "doctor_id", doctor_id
     ).eq("appointment_date", appointment_date).eq(
         "appointment_time", _time_str(appointment_time)
-    ).in_("status", ["Confirmed", "In Progress"]).execute()
+    ).in_("status", ["Confirmed", "In Progress", "Completed"]).execute()
     return len(result.data or []) == 0
 
 
