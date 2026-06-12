@@ -593,6 +593,16 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         ).eq("queue_date", today_ist).execute()
         current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
 
+        # Self-heal stale session: served token must exist in today's appointments
+        if current_token:
+            chk = _supa.table("appointments").select("id").eq(
+                "doctor_id", doctor_id
+            ).eq("appointment_date", today_ist).eq("token_number", current_token).execute()
+            if not chk.data:
+                current_token = 0
+                _supa.table("tokens").update({"current_token": 0}).eq(
+                    "doctor_id", doctor_id).eq("queue_date", today_ist).execute()
+
         # 2. ALL of this mobile's appointments today (self + family members)
         own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
         fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()

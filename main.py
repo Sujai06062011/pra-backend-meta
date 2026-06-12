@@ -912,6 +912,13 @@ async def queue_status(doctor_id: str, date: str = ""):
     appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).order("token_number", desc=False).execute()
     all_appts = appts.data or []
 
+    # Self-heal stale queue session: if the token being served no longer exists
+    # in today's appointments (e.g. appointments were deleted), reset to 0.
+    if current and not any((a.get("token_number") or 0) == current for a in all_appts):
+        current = 0
+        supabase.table("tokens").update({"current_token": 0}).eq(
+            "doctor_id", doctor_id).eq("queue_date", d).execute()
+
     # current_token = token being served right now (0 = queue not started).
     # An appointment is "In Progress" only when its token == current_token.
     for a in all_appts:
