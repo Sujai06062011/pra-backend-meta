@@ -526,7 +526,11 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     new_state = "idle"
                 else:
                     booked    = get_booked_slots(doctor_id, parsed_date)
-                    available = [s for s in ALL_SLOTS if s not in booked][:6]
+                    # For today, offer only future slots
+                    import pytz as _pytz
+                    _now = datetime.now(_pytz.timezone("Asia/Kolkata"))
+                    cutoff = _now.strftime("%H:%M") if parsed_date == _now.date().isoformat() else ""
+                    available = [s for s in ALL_SLOTS if s not in booked and s > cutoff][:6]
                     if not available:
                         reply     = f"Sorry! No slots available on {booking_date}. Please try another date."
                         new_state = "idle"
@@ -555,6 +559,17 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             booking_date = temp_data.get("booking_date", "")
             booking_name = temp_data.get("booking_name", patient_name)
             booking_for  = temp_data.get("booking_for", patient_id)
+
+            import pytz as _pytz
+            _now = datetime.now(_pytz.timezone("Asia/Kolkata"))
+            if parsed_date == _now.date().isoformat() and selected_slot <= _now.strftime("%H:%M"):
+                reply = (
+                    "That time has already passed. Please choose a later slot.\n"
+                    "Reply MENU to start again."
+                )
+                new_state = "idle"
+                save_conversation_state(from_number, new_state, {})
+                return reply
 
             existing = get_active_appointment(booking_for, doctor_id, parsed_date)
             if existing:

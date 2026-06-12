@@ -1631,13 +1631,18 @@ async def get_appointment_slots(doctor_id: str, date: str):
         if h12 == 0: h12 = 12
         return f"{h12}:{m_:02d} {suffix}"
 
+    # For today, slots whose time has already passed are not bookable
+    now_ist = datetime.now(IST)
+    past_cutoff = now_ist.strftime("%H:%M") if date == now_ist.date().isoformat() else ""
+
     return [
         {
             "time":         slot,
             "display":      display_time(slot),
             "booked_count": booked_counts.get(slot, 0),
             "max":          max_slot,
-            "available":    booked_counts.get(slot, 0) == 0,  # one active booking per slot
+            "past":         bool(past_cutoff) and slot <= past_cutoff,
+            "available":    booked_counts.get(slot, 0) == 0 and not (past_cutoff and slot <= past_cutoff),
         }
         for slot in all_slots
     ]
@@ -1684,6 +1689,12 @@ async def book_appointment(request: Request):
             f"Patient already has an appointment on {appt_date} at {ex_time_str} "
             f"(Token {ex_disp}). To re-schedule, please cancel it and book again."
         ))
+
+    # Today's past time slots can't be booked
+    now_ist = datetime.now(IST)
+    if appt_time and appt_date == now_ist.date().isoformat() \
+            and _time_str(appt_time) <= now_ist.strftime("%H:%M:%S"):
+        raise HTTPException(status_code=400, detail="That time slot has already passed. Please pick a later slot.")
 
     # Slot must be free (Cancelled rows free the slot)
     if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
