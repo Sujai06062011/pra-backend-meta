@@ -670,6 +670,13 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             def t_of(a):
                 return _time_str(a.get("appointment_time"))
 
+            def slot_display(a):
+                t = t_of(a)[:5]
+                try:
+                    return format_time(t)
+                except Exception:
+                    return t
+
             # The appointment being served (by status, else by tokens.current_token)
             serving = next((a for a in all_today if a.get("status") == "In Progress"), None)
             if not serving and current_token > 0:
@@ -708,16 +715,16 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                      f"Current Token: {current_display}\n"]
 
             for a in morning:
-                lines.append(f"{disp(a)} {appt_name(a)} → {session_status(a)}")
+                lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
 
             if evening:
                 evening_open = now_ist.strftime("%H:%M") >= eve_start[:5]
                 for a in evening:
                     if evening_open:
-                        lines.append(f"{disp(a)} {appt_name(a)} → {session_status(a)}")
+                        lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
                     else:
                         lines.append(
-                            f"{disp(a)} {appt_name(a)} → 🌙 Evening session. "
+                            f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → 🌙 Evening session. "
                             f"Check back after {eve_start_display}"
                         )
 
