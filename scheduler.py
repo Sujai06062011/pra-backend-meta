@@ -239,7 +239,7 @@ async def send_visit_summary():
     range_end   = f"{(today_ist + timedelta(days=1)).isoformat()}T00:00:00+05:30"
 
     result = supabase.table("visits").select(
-        "id, patient_id, doctor_id, diagnosis, follow_up_date, "
+        "id, patient_id, doctor_id, diagnosis, follow_up_date, visit_status, "
         "patients(name, mobile), doctors(clinic_name, name)"
     ).gte("created_at", range_start).lt("created_at", range_end).execute()
 
@@ -248,6 +248,9 @@ async def send_visit_summary():
 
     for visit in visits:
         try:
+            # Skip visits never completed (e.g. abandoned pre-created visits)
+            if visit.get("visit_status") == "In Progress":
+                continue
             patient = visit.get("patients", {})
             doctor  = visit.get("doctors", {})
             patient_name = patient.get("name", "Patient")

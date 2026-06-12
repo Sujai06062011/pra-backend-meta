@@ -893,6 +893,104 @@ async def get_patient_visits(patient_id: str):
     return result.data or []
 
 
+# ── VISITS & VITALS ───────────────────────────────────────
+@app.post("/visits")
+async def create_visit(request: Request):
+    """Create a bare visit (In Progress) so vitals can be recorded before the
+    prescription is saved. POST /prescriptions completes it with diagnosis."""
+    body = await request.json()
+    patient_id = body.get("patient_id")
+    if not patient_id:
+        raise HTTPException(status_code=400, detail="patient_id required")
+    now_ist = datetime.now(IST)
+    result = supabase.table("visits").insert({
+        "patient_id":     patient_id,
+        "doctor_id":      body.get("doctor_id", "8c33abe0-5d2e-4613-9437-c7c375e8d162"),
+        "appointment_id": body.get("appointment_id") or None,
+        "visit_status":   "In Progress",
+        "visit_date":     now_ist.date().isoformat(),
+        "created_at":     now_ist.isoformat(),
+    }).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Visit insert failed")
+    return result.data[0]
+
+
+_VITAL_INT_FIELDS = {"spo2_percent", "bp_systolic", "bp_diastolic", "pulse_bpm"}
+_VITAL_FLOAT_FIELDS = {"temperature_f", "weight_kg", "height_cm"}
+_VITAL_FIELDS = [
+    "temperature_f", "weight_kg", "height_cm",
+    "spo2_percent", "bp_systolic", "bp_diastolic",
+    "pulse_bpm", "key_findings",
+]
+
+
+@app.get("/visits/{visit_id}/vitals")
+async def get_visit_vitals(visit_id: str):
+    result = supabase.table("visit_vitals").select("*").eq(
+        "visit_id", visit_id
+    ).order("recorded_at", desc=True).limit(1).execute()
+    return {"vitals": result.data[0] if result.data else None}
+
+
+@app.post("/visits/{visit_id}/vitals")
+async def save_visit_vitals(visit_id: str, request: Request):
+    body = await request.json()
+
+    visit = supabase.table("visits").select("patient_id, doctor_id").eq(
+        "id", visit_id).limit(1).execute()
+    if not visit.data:
+        raise HTTPException(status_code=404, detail="Visit not found")
+
+    vitals_data = {
+        "visit_id": visit_id,
+        "patient_id": visit.data[0]["patient_id"],
+        "doctor_id": visit.data[0]["doctor_id"],
+        "recorded_by_role": body.get("recorded_by_role", "doctor"),
+        "updated_at": datetime.now(IST).isoformat(),
+    }
+
+    # Fields present in the body are written; "" / None clears the value.
+    # Fields absent from the body are left untouched on update.
+    for field in _VITAL_FIELDS:
+        if field not in body:
+            continue
+        v = body[field]
+        if v in (None, ""):
+            vitals_data[field] = None
+        elif field in _VITAL_INT_FIELDS:
+            try:
+                vitals_data[field] = int(float(v))
+            except (TypeError, ValueError):
+                continue
+        elif field in _VITAL_FLOAT_FIELDS:
+            try:
+                vitals_data[field] = float(v)
+            except (TypeError, ValueError):
+                continue
+        else:
+            vitals_data[field] = v
+
+    existing = supabase.table("visit_vitals").select("id").eq(
+        "visit_id", visit_id).limit(1).execute()
+    if existing.data:
+        result = supabase.table("visit_vitals").update(vitals_data).eq(
+            "visit_id", visit_id).execute()
+    else:
+        vitals_data["recorded_at"] = datetime.now(IST).isoformat()
+        result = supabase.table("visit_vitals").insert(vitals_data).execute()
+
+    return {"success": True, "vitals": result.data[0] if result.data else None}
+
+
+@app.get("/patients/{patient_id}/vitals-history")
+async def get_patient_vitals_history(patient_id: str):
+    result = supabase.table("visit_vitals").select(
+        "*, visits(visit_date, chief_complaint)"
+    ).eq("patient_id", patient_id).order("recorded_at", desc=True).limit(5).execute()
+    return {"history": result.data or []}
+
+
 # ── APPOINTMENTS ──────────────────────────────────────────
 def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
     """Attach display_token (M1/E1…) and time-order queue_status to rows.
@@ -1273,8 +1371,19 @@ async def create_prescription_v2(request: Request):
         meta = _json.dumps({"__walkin": True, "name": walkin_name or "", "age": walkin_age, "complaint": chief_complaint, "diagnosis": diagnosis}, ensure_ascii=False)
         notes = f"WALKIN::{meta}::END\n{notes}" if notes else f"WALKIN::{meta}::END"
 
-    # Auto-create visit if patient linked and no visit provided
+    # Complete a pre-created visit (eager visit from the prescription page)
     visit_id = visit_id_req
+    if visit_id:
+        visit_update = {
+            "chief_complaint": chief_complaint,
+            "diagnosis":       diagnosis,
+            "visit_status":    "Completed",
+        }
+        if appointment_id:
+            visit_update["appointment_id"] = appointment_id
+        db.table("visits").update(visit_update).eq("id", visit_id).execute()
+
+    # Auto-create visit if patient linked and no visit provided
     if patient_id and not visit_id:
         visit_res = db.table("visits").insert({
             "patient_id":      patient_id,
