@@ -657,7 +657,8 @@ async def list_patients(doctor_id: str, search: str = ""):
     # patients table has no doctor_id — single-clinic deployment, return all patients
     q = supabase.table("patients").select("*")
     if search:
-        q = q.or_(f"name.ilike.%{search}%,mobile.ilike.%{search}%")
+        # match family members registered under another head's mobile too
+        q = q.or_(f"name.ilike.%{search}%,mobile.ilike.%{search}%,family_head_mobile.ilike.%{search}%")
     result = q.order("created_at", desc=True).execute()
     return result.data or []
 
