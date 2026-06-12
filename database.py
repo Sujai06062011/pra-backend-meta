@@ -250,6 +250,17 @@ def assign_token_for_slot(doctor_id: str, appointment_date: str, appointment_tim
     return 1
 
 
+def get_active_appointment(patient_id: str, doctor_id: str, date_str: str):
+    """The patient's existing Confirmed/In Progress appointment on a date, if any.
+    Used to enforce one active appointment per patient per day."""
+    result = supabase.table("appointments").select(
+        "id, appointment_time, token_number, status"
+    ).eq("patient_id", patient_id).eq("doctor_id", doctor_id).eq(
+        "appointment_date", date_str
+    ).in_("status", ["Confirmed", "In Progress"]).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
 def ensure_queue_session(doctor_id: str, queue_date: str):
     """Create the day's tokens session row on first booking, bump total_tokens after.
     Emulates: INSERT ... ON CONFLICT (doctor_id, queue_date) DO UPDATE total_tokens+1"""

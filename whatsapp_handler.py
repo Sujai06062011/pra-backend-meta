@@ -6,7 +6,7 @@ from database import (
     check_holiday, get_booked_slots, get_next_token, create_appointment,
     get_upcoming_appointments, get_family_upcoming_appointments, cancel_appointment, create_patient,
     get_display_token, assign_token_for_slot, is_slot_available, _time_str,
-    get_slot_config,
+    get_slot_config, get_active_appointment,
 )
 from database import supabase as _supa
 
@@ -556,7 +556,21 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             booking_name = temp_data.get("booking_name", patient_name)
             booking_for  = temp_data.get("booking_for", patient_id)
 
-            if not is_slot_available(doctor_id, parsed_date, selected_slot):
+            existing = get_active_appointment(booking_for, doctor_id, parsed_date)
+            if existing:
+                ex_time = format_time(_time_str(existing.get("appointment_time"))[:5])
+                ex_tok = get_display_token(
+                    existing.get("token_number"), existing.get("appointment_time")
+                )
+                reply = (
+                    f"{booking_name} already has an appointment on {booking_date} "
+                    f"at {ex_time} (Token {ex_tok}). ⚠️\n\n"
+                    f"To re-schedule, please cancel it first and book again.\n"
+                    f"Reply 3 to cancel an appointment."
+                    + MENU_HINT
+                )
+                new_state = "idle"
+            elif not is_slot_available(doctor_id, parsed_date, selected_slot):
                 reply = (
                     "Sorry, that slot is already taken. "
                     "Please choose a different time.\n"

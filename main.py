@@ -1665,6 +1665,22 @@ async def book_appointment(request: Request):
     appt_time     = body.get("appointment_time") or ""
     visit_type    = body.get("visit_type") or "New Visit"
 
+    # One active appointment per patient per day
+    from database import get_active_appointment
+    existing = get_active_appointment(patient_id, doctor_id, appt_date)
+    if existing:
+        ex_time = _time_str(existing.get("appointment_time"))
+        ex_disp = get_display_token(existing.get("token_number"), ex_time)
+        try:
+            h = int(ex_time[:2]); h12 = h % 12 or 12
+            ex_time_str = f"{h12}:{ex_time[3:5]} {'PM' if h >= 12 else 'AM'}"
+        except Exception:
+            ex_time_str = ex_time
+        raise HTTPException(status_code=400, detail=(
+            f"Patient already has an appointment on {appt_date} at {ex_time_str} "
+            f"(Token {ex_disp}). To re-schedule, please cancel it and book again."
+        ))
+
     # Slot must be free (Cancelled rows free the slot)
     if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
         raise HTTPException(status_code=400, detail="Slot already booked")
