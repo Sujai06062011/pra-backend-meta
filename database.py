@@ -156,6 +156,66 @@ def get_next_token(doctor_id: str, date_str: str):
     return 1
 
 
+def _time_str(t) -> str:
+    """Normalize appointment_time (str or datetime.time) to 'HH:MM:SS'."""
+    if not t:
+        return ""
+    if isinstance(t, str):
+        return t + ":00" if len(t) == 5 else t
+    return t.strftime("%H:%M:%S")
+
+
+def get_display_token(token_number, appointment_time, all_day_appointments) -> str:
+    """Session display token (M1/M2/E1…). Pure — no DB calls.
+    Morning < 13:00 ≤ evening; numbering restarts per session.
+    DB token_number stays an integer — this is display-only, never stored."""
+    is_evening = _time_str(appointment_time) >= "13:00:00"
+    prefix = "E" if is_evening else "M"
+
+    session_appts = sorted([
+        a for a in all_day_appointments
+        if a.get("status") not in ("Cancelled",)
+        and (_time_str(a.get("appointment_time")) >= "13:00:00") == is_evening
+    ], key=lambda x: x.get("token_number") or 0)
+
+    for i, appt in enumerate(session_appts):
+        if appt.get("token_number") == token_number:
+            return f"{prefix}{i + 1}"
+    return f"{prefix}?"
+
+
+def is_slot_available(doctor_id: str, appointment_date: str, appointment_time) -> bool:
+    """A slot is free unless a Confirmed/In Progress appointment occupies it.
+    Cancelled appointments free the slot."""
+    result = supabase.table("appointments").select("id").eq(
+        "doctor_id", doctor_id
+    ).eq("appointment_date", appointment_date).eq(
+        "appointment_time", _time_str(appointment_time)
+    ).in_("status", ["Confirmed", "In Progress"]).execute()
+    return len(result.data or []) == 0
+
+
+def assign_token_for_slot(doctor_id: str, appointment_date: str, appointment_time) -> int:
+    """Token to assign for this slot: reuse a cancelled appointment's token at the
+    exact same slot, otherwise MAX(token_number)+1 among non-cancelled for the day."""
+    cancelled = supabase.table("appointments").select("token_number").eq(
+        "doctor_id", doctor_id
+    ).eq("appointment_date", appointment_date).eq(
+        "appointment_time", _time_str(appointment_time)
+    ).eq("status", "Cancelled").limit(1).execute()
+    if cancelled.data and cancelled.data[0].get("token_number"):
+        return cancelled.data[0]["token_number"]
+
+    existing = supabase.table("appointments").select("token_number").eq(
+        "doctor_id", doctor_id
+    ).eq("appointment_date", appointment_date).neq(
+        "status", "Cancelled"
+    ).order("token_number", desc=True).limit(1).execute()
+    if existing.data:
+        return (existing.data[0].get("token_number") or 0) + 1
+    return 1
+
+
 def ensure_queue_session(doctor_id: str, queue_date: str):
     """Create the day's tokens session row on first booking, bump total_tokens after.
     Emulates: INSERT ... ON CONFLICT (doctor_id, queue_date) DO UPDATE total_tokens+1"""
@@ -180,16 +240,34 @@ def ensure_queue_session(doctor_id: str, queue_date: str):
 
 
 def create_appointment(patient_id: str, doctor_id: str, date_str: str,
-                       time_str: str, token: int):
-    """Create a new appointment"""
+                       time_str: str, token: int, booking_source: str = "whatsapp"):
+    """Create a new appointment. If a cancelled row occupies this exact slot,
+    reuse it via UPDATE (recycles its token, avoids unique-constraint clashes)."""
+    t = _time_str(time_str)
+
+    if t:
+        cancelled = supabase.table("appointments").select("id").eq(
+            "doctor_id", doctor_id
+        ).eq("appointment_date", date_str).eq(
+            "appointment_time", t
+        ).eq("status", "Cancelled").limit(1).execute()
+        if cancelled.data:
+            result = supabase.table("appointments").update({
+                "patient_id": patient_id,
+                "status": "Confirmed",
+                "booking_source": booking_source,
+                "cancellation_reason": None,
+            }).eq("id", cancelled.data[0]["id"]).execute()
+            return result.data[0] if result.data else None
+
     result = supabase.table("appointments").insert({
         "patient_id": patient_id,
         "doctor_id": doctor_id,
         "appointment_date": date_str,
-        "appointment_time": time_str + ":00",
+        "appointment_time": t,
         "token_number": token,
         "status": "Confirmed",
-        "booking_source": "whatsapp"
+        "booking_source": booking_source
     }).execute()
     ensure_queue_session(doctor_id, date_str)
     return result.data[0] if result.data else None

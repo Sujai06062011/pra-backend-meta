@@ -5,6 +5,7 @@ from database import (
     save_conversation_state, get_queue_status, get_patient_token_today, get_family_tokens_today,
     check_holiday, get_booked_slots, get_next_token, create_appointment,
     get_upcoming_appointments, get_family_upcoming_appointments, cancel_appointment, create_patient,
+    get_display_token, assign_token_for_slot, is_slot_available, _time_str,
 )
 from database import supabase as _supa
 
@@ -554,28 +555,43 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             booking_name = temp_data.get("booking_name", patient_name)
             booking_for  = temp_data.get("booking_for", patient_id)
 
-            token = get_next_token(doctor_id, parsed_date)
-            create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+            if not is_slot_available(doctor_id, parsed_date, selected_slot):
+                reply = (
+                    "Sorry, that slot is already taken. "
+                    "Please choose a different time.\n"
+                    "Reply MENU to see available slots."
+                )
+                new_state = "idle"
+            else:
+                # Token is always server-assigned (reuses cancelled slot's token)
+                token = assign_token_for_slot(doctor_id, parsed_date, selected_slot)
+                create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
 
-            # Fetch patient_code for confirmation message
-            try:
-                _pc = _supa.table("patients").select("patient_code").eq("id", booking_for).single().execute()
-                patient_code_line = f"\nPatient Code: {_pc.data['patient_code']}" if _pc.data and _pc.data.get("patient_code") else ""
-            except Exception:
-                patient_code_line = ""
+                all_appts = _supa.table("appointments").select(
+                    "token_number, appointment_time, status"
+                ).eq("doctor_id", doctor_id).eq("appointment_date", parsed_date).execute().data or []
+                display_tok = get_display_token(token, _time_str(selected_slot), all_appts)
 
-            reply = (
-                f"Appointment Confirmed! ✅\n\n"
-                f"Patient: {booking_name}"
-                f"{patient_code_line}\n"
-                f"Date: {booking_date}\n"
-                f"Time: {format_time(selected_slot)}\n"
-                f"Token: #{token}\n"
-                f"Clinic: {clinic_name}\n\n"
-                f"See you soon!"
-                + MENU_HINT
-            )
-            new_state = "idle"
+                # Fetch patient_code for confirmation message
+                try:
+                    _pc = _supa.table("patients").select("patient_code").eq("id", booking_for).single().execute()
+                    patient_code_line = f"\nPatient Code: {_pc.data['patient_code']}" if _pc.data and _pc.data.get("patient_code") else ""
+                except Exception:
+                    patient_code_line = ""
+
+                reply = (
+                    f"Appointment Confirmed! ✅\n\n"
+                    f"Patient: {booking_name}"
+                    f"{patient_code_line}\n"
+                    f"Date: {booking_date}\n"
+                    f"Time: {format_time(selected_slot)}\n"
+                    f"Token: {display_tok}\n"
+                    f"Clinic: {clinic_name}\n\n"
+                    f"Please mention your token when you arrive.\n"
+                    f"Reply CANCEL to cancel. See you soon!"
+                    + MENU_HINT
+                )
+                new_state = "idle"
         except (IndexError, ValueError):
             reply     = "Invalid choice. Please reply with a number from the list."
             new_state = "awaiting_slot"
@@ -623,73 +639,76 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 "Reply 1 to book an appointment."
             )
         else:
-            def appt_hour(a):
-                try:
-                    return int((a.get("appointment_time") or "")[:2])
-                except ValueError:
-                    return 9  # no time stored → treat as morning
+            # All of today's appointments (any status) for display-token numbering
+            all_today = _supa.table("appointments").select(
+                "token_number, appointment_time, status"
+            ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).execute().data or []
 
             def appt_name(a):
                 return (a.get("patients") or {}).get("name", "Patient")
 
-            def appt_time_display(a):
-                t = (a.get("appointment_time") or "")[:5]
-                try:
-                    return format_time(t)
-                except Exception:
-                    return t
+            def disp(a):
+                return get_display_token(
+                    a.get("token_number"), a.get("appointment_time"), all_today
+                )
 
-            # 3. Split by session: morning < 13:00 ≤ evening
-            morning = [a for a in my_appts if appt_hour(a) < 13]
-            evening = [a for a in my_appts if appt_hour(a) >= 13]
-
-            if now_ist.hour < 13:
-                active_appointments   = morning
-                upcoming_appointments = evening
+            # Current token shown as display token (M2/E1) when resolvable
+            in_prog = next((a for a in all_today if a.get("status") == "In Progress"), None)
+            if in_prog:
+                current_display = disp(in_prog)
+            elif current_token > 0:
+                curr = next(
+                    (a for a in all_today if a.get("token_number") == current_token), None
+                )
+                current_display = disp(curr) if curr else str(current_token)
             else:
-                active_appointments   = evening
-                upcoming_appointments = []  # morning session already over
+                current_display = "Not started"
 
-            if active_appointments:
-                lines = [f"🏥 {clinic_name} - Live Queue\n"]
-                lines.append(f"Current Token: {current_token}\n")
-                for a in active_appointments:
-                    token = a.get("token_number") or 0
-                    if a.get("status") == "In Progress" or (current_token and token == current_token):
-                        status_text = "🟢 Now being seen"
-                    elif a.get("status") == "Completed" or (token and token < current_token):
-                        status_text = "✅ Done"
-                    else:  # Confirmed / waiting
-                        tokens_ahead = max(0, token - current_token - 1)
-                        status_text = f"⏳ ~{tokens_ahead * 15} mins wait"
-                    lines.append(f"#{token} {appt_name(a)} → {status_text}")
+            def session_status(a, is_evening: bool):
+                token = a.get("token_number") or 0
+                if a.get("status") == "In Progress" or (current_token and token == current_token):
+                    return "🟢 Now being seen"
+                if a.get("status") == "Completed" or (token and token < current_token):
+                    return "✅ Done"
+                ahead = len([
+                    x for x in all_today
+                    if (x.get("token_number") or 0) < token
+                    and (x.get("token_number") or 0) > current_token
+                    and x.get("status") == "Confirmed"
+                    and (_time_str(x.get("appointment_time")) >= "13:00:00") == is_evening
+                ])
+                wait = ahead * 15
+                return f"⏳ ~{wait} mins wait" if wait > 0 else "⏳ Next in line"
 
-                if upcoming_appointments:
-                    lines.append("\nEvening session:")
-                    for a in upcoming_appointments:
+            morning = sorted(
+                [a for a in my_appts if _time_str(a.get("appointment_time")) < "13:00:00"],
+                key=lambda x: x.get("token_number") or 0
+            )
+            evening = sorted(
+                [a for a in my_appts if _time_str(a.get("appointment_time")) >= "13:00:00"],
+                key=lambda x: x.get("token_number") or 0
+            )
+
+            lines = [f"🏥 {clinic_name} - Live Queue\n",
+                     f"Current Token: {current_display}\n"]
+
+            for a in morning:
+                lines.append(f"{disp(a)} {appt_name(a)} → {session_status(a, False)}")
+
+            if evening:
+                if now_ist.hour < 13:
+                    lines.append("\n🌙 Evening Session (5:00 PM – 8:00 PM):")
+                    for a in evening:
                         lines.append(
-                            f"#{a.get('token_number')} {appt_name(a)} → "
-                            f"Starts at {appt_time_display(a)}"
+                            f"{disp(a)} {appt_name(a)} → Session not started yet. "
+                            f"Check back after 5 PM."
                         )
+                else:
+                    for a in evening:
+                        lines.append(f"{disp(a)} {appt_name(a)} → {session_status(a, True)}")
 
-                lines.append("\nReply MENU for main menu")
-                reply = "\n".join(lines)
-            elif upcoming_appointments:
-                # All morning done, evening not started yet
-                reply = (
-                    "Morning session completed.\n\n"
-                    "Your evening appointments:\n"
-                    + "\n".join(
-                        f"#{a.get('token_number')} {appt_name(a)} → {appt_time_display(a)}"
-                        for a in upcoming_appointments
-                    )
-                    + "\n\nReply MENU for main menu"
-                )
-            else:
-                reply = (
-                    "All your appointments for today are completed. ✅\n\n"
-                    "Reply MENU for main menu"
-                )
+            lines.append("\nReply MENU for main menu")
+            reply = "\n".join(lines)
 
     # ── CANCEL APPOINTMENT ────────────────────────────────────
     elif intent == "cancel":
@@ -698,6 +717,15 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             reply     = "You have no upcoming appointments to cancel.\n\nReply 1 to book an appointment."
             new_state = "idle"
         else:
+            # Per-date appointment lists for display-token numbering
+            day_cache = {}
+            def day_appts(d):
+                if d not in day_cache:
+                    day_cache[d] = _supa.table("appointments").select(
+                        "token_number, appointment_time, status"
+                    ).eq("doctor_id", doctor_id).eq("appointment_date", d).execute().data or []
+                return day_cache[d]
+
             apt_list = "Your upcoming appointments:\n\n"
             for i, apt in enumerate(appointments, 1):
                 apt_date = datetime.strptime(
@@ -706,7 +734,12 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 apt_time = format_time(apt["appointment_time"][:5])
                 token    = apt.get("token_number")
                 name     = apt.get("patient_name", "")
-                token_str = f" (Token #{token})" if token else ""
+                token_str = ""
+                if token:
+                    d_tok = get_display_token(
+                        token, apt["appointment_time"], day_appts(apt["appointment_date"])
+                    )
+                    token_str = f" (Token {d_tok})"
                 apt_list += f"{i}. {name} — {apt_date} at {apt_time}{token_str}\n"
             apt_list += "\nReply with number to cancel. Reply 0 to go back."
             reply     = apt_list
@@ -722,13 +755,27 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 choice       = int(t) - 1
                 appointments = temp_data.get("appointments", [])
                 apt          = appointments[choice]
+
+                # Display token computed before cancelling (still in session list)
+                token_str = ""
+                if apt.get("token_number"):
+                    day = _supa.table("appointments").select(
+                        "token_number, appointment_time, status"
+                    ).eq("doctor_id", doctor_id).eq(
+                        "appointment_date", apt["appointment_date"]
+                    ).execute().data or []
+                    d_tok = get_display_token(
+                        apt["token_number"], apt["appointment_time"], day
+                    )
+                    token_str = f" (Token {d_tok})"
+
                 cancel_appointment(apt["id"])
                 apt_date = datetime.strptime(
                     apt["appointment_date"], "%Y-%m-%d"
                 ).strftime("%d %B %Y")
                 apt_time = format_time(apt["appointment_time"][:5])
                 reply = (
-                    f"Your appointment on {apt_date} at {apt_time} "
+                    f"Your appointment{token_str} on {apt_date} at {apt_time} "
                     f"has been cancelled. ✅\n\n"
                     f"Reply 1 to book a new appointment."
                     + MENU_HINT

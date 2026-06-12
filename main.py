@@ -13,6 +13,7 @@ from whatsapp_handler import handle_message
 from scheduler import init_scheduler, reschedule
 from followup import prewarm_response_audios
 from database import supabase, save_conversation_state as upsert_conversation_state
+from database import get_display_token, assign_token_for_slot, is_slot_available, _time_str
 import config_loader
 
 
@@ -623,6 +624,18 @@ async def dashboard_stats(doctor_id: str):
     current_token_val = token_row.data[0]["current_token"] if token_row.data else 0
     today_completed_count = current_token_val
 
+    # Display token (M1/E1…) for the token being served
+    current_display_token = None
+    if current_token_val:
+        day_rows = supabase.table("appointments").select(
+            "token_number, appointment_time, status"
+        ).eq("doctor_id", doctor_id).eq("appointment_date", today).execute().data or []
+        curr = next((a for a in day_rows if a.get("token_number") == current_token_val), None)
+        if curr:
+            current_display_token = get_display_token(
+                current_token_val, curr.get("appointment_time"), day_rows
+            )
+
     week_map = defaultdict(int)
     for i in range(6, -1, -1):
         week_map[(date.today() - timedelta(days=i)).isoformat()] = 0
@@ -642,6 +655,7 @@ async def dashboard_stats(doctor_id: str):
     return {
         "today_appointments": today_appts.count or 0,
         "current_token": current_token_val,
+        "current_display_token": current_display_token,
         "total_patients": total_patients,
         "pending_followups": pending_followups.count or 0,
         "today_completed": today_completed_count,
@@ -869,12 +883,31 @@ async def get_patient_visits(patient_id: str):
 
 
 # ── APPOINTMENTS ──────────────────────────────────────────
+def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
+    """Attach display_token (M1/E1…) to appointment rows. Computed per date
+    against the full day's list — never stored in the DB."""
+    dates = {a.get("appointment_date") for a in appointments if a.get("appointment_date")}
+    day_map = {}
+    for d in dates:
+        day_map[d] = supabase.table("appointments").select(
+            "token_number, appointment_time, status"
+        ).eq("doctor_id", doctor_id).eq("appointment_date", d).execute().data or []
+    for a in appointments:
+        if a.get("token_number") and a.get("appointment_date") in day_map:
+            a["display_token"] = get_display_token(
+                a["token_number"], a.get("appointment_time"), day_map[a["appointment_date"]]
+            )
+        else:
+            a["display_token"] = None
+    return appointments
+
+
 @app.get("/appointments/today")
 async def today_appointments(doctor_id: str):
     from database import supabase
     today = date.today().isoformat()
     result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).order("token_number", desc=False).execute()
-    return result.data or []
+    return _annotate_display_tokens(result.data or [], doctor_id)
 
 
 @app.get("/appointments")
@@ -888,7 +921,7 @@ async def list_appointments(doctor_id: str, date: str = "", date_from: str = "",
     elif date_from and date_to:
         q = q.gte("appointment_date", date_from).lte("appointment_date", date_to)
     result = q.order("appointment_date", desc=True).order("token_number", desc=False).limit(50).execute()
-    return result.data or []
+    return _annotate_display_tokens(result.data or [], doctor_id)
 
 
 @app.patch("/appointments/{appointment_id}/status")
@@ -932,12 +965,22 @@ async def queue_status(doctor_id: str, date: str = ""):
         else:
             a["queue_status"] = "Waiting"
 
+    # Display tokens (M1/E1…) — computed against this same full-day list
+    for a in all_appts:
+        a["display_token"] = get_display_token(
+            a.get("token_number"), a.get("appointment_time"), all_appts
+        ) if a.get("token_number") else None
+
+    curr_appt = next((a for a in all_appts if (a.get("token_number") or 0) == current), None)
+    current_display = curr_appt["display_token"] if (current and curr_appt) else None
+
     confirmed = [a for a in all_appts if a.get("status") == "Confirmed"]
     seen    = [a for a in confirmed if (a.get("token_number") or 0) < current]
     waiting = [a for a in confirmed if (a.get("token_number") or 0) > current]
 
     return {
         "current_token": current,
+        "current_display": current_display,
         "total_today": len(all_appts),
         "waiting": len(waiting),
         "completed": len(seen),
@@ -1550,12 +1593,12 @@ async def get_appointment_slots(doctor_id: str, date: str):
 
     all_slots = gen_slots(start_m, end_m) + gen_slots(start_e, end_e)
 
-    # Count bookings for each slot
+    # Count active bookings for each slot (Cancelled rows free the slot)
     appts_res = supabase.table("appointments")\
         .select("appointment_time")\
         .eq("doctor_id", doctor_id)\
         .eq("appointment_date", date)\
-        .eq("status", "Confirmed")\
+        .in_("status", ["Confirmed", "In Progress"])\
         .execute()
     booked_counts: dict[str, int] = {}
     for a in (appts_res.data or []):
@@ -1575,7 +1618,7 @@ async def get_appointment_slots(doctor_id: str, date: str):
             "display":      display_time(slot),
             "booked_count": booked_counts.get(slot, 0),
             "max":          max_slot,
-            "available":    True,  # always allow (soft limit)
+            "available":    booked_counts.get(slot, 0) == 0,  # one active booking per slot
         }
         for slot in all_slots
     ]
@@ -1607,32 +1650,26 @@ async def book_appointment(request: Request):
     appt_time     = body.get("appointment_time") or ""
     visit_type    = body.get("visit_type") or "New Visit"
 
-    # Next token
-    tok_res = supabase.table("appointments")\
-        .select("token_number")\
-        .eq("doctor_id", doctor_id)\
-        .eq("appointment_date", appt_date)\
-        .execute()
-    token = max((r.get("token_number") or 0 for r in (tok_res.data or [])), default=0) + 1
+    # Slot must be free (Cancelled rows free the slot)
+    if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
+        raise HTTPException(status_code=400, detail="Slot already booked")
 
-    # Insert appointment
-    appt_row = {
-        "patient_id":        patient_id,
-        "doctor_id":         doctor_id,
-        "appointment_date":  appt_date,
-        "appointment_time":  appt_time,
-        "token_number":      token,
-        "status":            "Confirmed",
-    }
-    ins = supabase.table("appointments").insert(appt_row).execute()
-    if not ins.data:
-        from fastapi import HTTPException
+    # Token is always server-assigned — never taken from the request body
+    token = assign_token_for_slot(doctor_id, appt_date, appt_time)
+
+    from database import create_appointment as db_create_appointment
+    appt = db_create_appointment(patient_id, doctor_id, appt_date, appt_time,
+                                 token, booking_source="frontend")
+    if not appt:
         raise HTTPException(status_code=500, detail="Appointment insert failed")
-    appt_id = ins.data[0]["id"]
+    appt_id = appt["id"]
+    token = appt.get("token_number") or token
 
-    # Ensure the day's queue session row exists (tokens table)
-    from database import ensure_queue_session
-    ensure_queue_session(doctor_id, appt_date)
+    # Display token (M1/E1…) for messages and response
+    all_day = supabase.table("appointments").select(
+        "token_number, appointment_time, status"
+    ).eq("doctor_id", doctor_id).eq("appointment_date", appt_date).execute().data or []
+    display_tok = get_display_token(token, appt_time, all_day)
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()
@@ -1669,7 +1706,7 @@ async def book_appointment(request: Request):
             f"🏥 Dr. Kumar Child Care Clinic\n"
             f"👤 {pat_name} ({pat_code})\n"
             f"📅 {date_display}\n"
-            f"⏰ {time_display} | Token #{token}\n\n"
+            f"⏰ {time_display} | Token {display_tok}\n\n"
             f"வரும்போது இந்த token number சொல்லுங்கள்.\n"
             f"ரத்து செய்ய CANCEL என்று reply பண்ணுங்கள்.\n"
             f"MENU — முகப்பு பக்கம்."
@@ -1680,8 +1717,8 @@ async def book_appointment(request: Request):
             f"🏥 Dr. Kumar Child Care Clinic\n"
             f"👤 {pat_name} ({pat_code})\n"
             f"📅 {date_display}\n"
-            f"⏰ {time_display} | Token #{token}\n\n"
-            f"Please mention your token number when you arrive.\n"
+            f"⏰ {time_display} | Token {display_tok}\n\n"
+            f"Please mention your token when you arrive.\n"
             f"Reply CANCEL to cancel. Reply MENU for help."
         )
 
@@ -1697,6 +1734,7 @@ async def book_appointment(request: Request):
     return {
         "appointment_id": appt_id,
         "token_number":   token,
+        "display_token":  display_tok,
         "patient_name":   pat_name,
         "whatsapp_sent":  wa_sent,
     }
