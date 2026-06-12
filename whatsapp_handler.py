@@ -567,10 +567,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 token = assign_token_for_slot(doctor_id, parsed_date, selected_slot)
                 create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
 
-                all_appts = _supa.table("appointments").select(
-                    "token_number, appointment_time, status"
-                ).eq("doctor_id", doctor_id).eq("appointment_date", parsed_date).execute().data or []
-                display_tok = get_display_token(token, _time_str(selected_slot), all_appts)
+                display_tok = get_display_token(token, selected_slot)
 
                 # Fetch patient_code for confirmation message
                 try:
@@ -717,15 +714,6 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             reply     = "You have no upcoming appointments to cancel.\n\nReply 1 to book an appointment."
             new_state = "idle"
         else:
-            # Per-date appointment lists for display-token numbering
-            day_cache = {}
-            def day_appts(d):
-                if d not in day_cache:
-                    day_cache[d] = _supa.table("appointments").select(
-                        "token_number, appointment_time, status"
-                    ).eq("doctor_id", doctor_id).eq("appointment_date", d).execute().data or []
-                return day_cache[d]
-
             apt_list = "Your upcoming appointments:\n\n"
             for i, apt in enumerate(appointments, 1):
                 apt_date = datetime.strptime(
@@ -736,9 +724,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 name     = apt.get("patient_name", "")
                 token_str = ""
                 if token:
-                    d_tok = get_display_token(
-                        token, apt["appointment_time"], day_appts(apt["appointment_date"])
-                    )
+                    d_tok = get_display_token(token, apt["appointment_time"])
                     token_str = f" (Token {d_tok})"
                 apt_list += f"{i}. {name} — {apt_date} at {apt_time}{token_str}\n"
             apt_list += "\nReply with number to cancel. Reply 0 to go back."
@@ -756,17 +742,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 appointments = temp_data.get("appointments", [])
                 apt          = appointments[choice]
 
-                # Display token computed before cancelling (still in session list)
                 token_str = ""
                 if apt.get("token_number"):
-                    day = _supa.table("appointments").select(
-                        "token_number, appointment_time, status"
-                    ).eq("doctor_id", doctor_id).eq(
-                        "appointment_date", apt["appointment_date"]
-                    ).execute().data or []
-                    d_tok = get_display_token(
-                        apt["token_number"], apt["appointment_time"], day
-                    )
+                    d_tok = get_display_token(apt["token_number"], apt["appointment_time"])
                     token_str = f" (Token {d_tok})"
 
                 cancel_appointment(apt["id"])

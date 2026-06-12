@@ -165,23 +165,57 @@ def _time_str(t) -> str:
     return t.strftime("%H:%M:%S")
 
 
-def get_display_token(token_number, appointment_time, all_day_appointments) -> str:
-    """Session display token (M1/M2/E1…). Pure — no DB calls.
-    Morning < 13:00 ≤ evening; numbering restarts per session.
-    DB token_number stays an integer — this is display-only, never stored."""
-    is_evening = _time_str(appointment_time) >= "13:00:00"
+_slot_cfg_cache = {"data": None, "ts": 0.0}
+
+
+def get_slot_config() -> dict:
+    """Clinic slot grid config (session starts + minutes per patient),
+    cached for 5 minutes. Single-clinic deployment — no doctor filter."""
+    import time as _time_mod
+    if _slot_cfg_cache["data"] and _time_mod.time() - _slot_cfg_cache["ts"] < 300:
+        return _slot_cfg_cache["data"]
+    try:
+        res = supabase.table("clinic_config").select("config_key, config_value").in_(
+            "config_key", [
+                "clinic.slot_start_morning",
+                "clinic.slot_start_evening",
+                "clinic.slot_duration_minutes",
+            ]).execute()
+        cfg = {r["config_key"]: r["config_value"] for r in (res.data or [])}
+    except Exception:
+        cfg = {}
+    data = {
+        "morning_start": cfg.get("clinic.slot_start_morning", "09:00"),
+        "evening_start": cfg.get("clinic.slot_start_evening", "17:00"),
+        "duration": int(cfg.get("clinic.slot_duration_minutes") or 15),
+    }
+    _slot_cfg_cache["data"] = data
+    _slot_cfg_cache["ts"] = _time_mod.time()
+    return data
+
+
+def get_display_token(token_number, appointment_time, all_day_appointments=None) -> str:
+    """Slot-position display token: every time slot maps to a FIXED token in its
+    session — morning start → M1, next slot → M2 …, evening start → E1, etc.
+    Position = (slot time − session start) / slot duration, so changing the
+    per-patient minutes in clinic config re-maps tokens automatically.
+    DB token_number stays an integer; this is display-only, never stored."""
+    t = _time_str(appointment_time)
+    if not t:
+        return f"#{token_number}" if token_number else "?"
+
+    is_evening = t >= "13:00:00"
+    cfg = get_slot_config()
+    start = cfg["evening_start"] if is_evening else cfg["morning_start"]
     prefix = "E" if is_evening else "M"
 
-    session_appts = sorted([
-        a for a in all_day_appointments
-        if a.get("status") not in ("Cancelled",)
-        and (_time_str(a.get("appointment_time")) >= "13:00:00") == is_evening
-    ], key=lambda x: x.get("token_number") or 0)
+    def _mins(x):
+        return int(x[:2]) * 60 + int(x[3:5])
 
-    for i, appt in enumerate(session_appts):
-        if appt.get("token_number") == token_number:
-            return f"{prefix}{i + 1}"
-    return f"{prefix}?"
+    delta = _mins(t) - _mins(start)
+    if delta < 0:
+        return f"{prefix}?"
+    return f"{prefix}{delta // cfg['duration'] + 1}"
 
 
 def is_slot_available(doctor_id: str, appointment_date: str, appointment_time) -> bool:

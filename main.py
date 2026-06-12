@@ -884,21 +884,12 @@ async def get_patient_visits(patient_id: str):
 
 # ── APPOINTMENTS ──────────────────────────────────────────
 def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
-    """Attach display_token (M1/E1…) to appointment rows. Computed per date
-    against the full day's list — never stored in the DB."""
-    dates = {a.get("appointment_date") for a in appointments if a.get("appointment_date")}
-    day_map = {}
-    for d in dates:
-        day_map[d] = supabase.table("appointments").select(
-            "token_number, appointment_time, status"
-        ).eq("doctor_id", doctor_id).eq("appointment_date", d).execute().data or []
+    """Attach display_token (M1/E1…) to appointment rows — slot-position
+    based, computed from appointment_time. Never stored in the DB."""
     for a in appointments:
-        if a.get("token_number") and a.get("appointment_date") in day_map:
-            a["display_token"] = get_display_token(
-                a["token_number"], a.get("appointment_time"), day_map[a["appointment_date"]]
-            )
-        else:
-            a["display_token"] = None
+        a["display_token"] = get_display_token(
+            a.get("token_number"), a.get("appointment_time")
+        ) if a.get("appointment_time") else None
     return appointments
 
 
@@ -1665,11 +1656,8 @@ async def book_appointment(request: Request):
     appt_id = appt["id"]
     token = appt.get("token_number") or token
 
-    # Display token (M1/E1…) for messages and response
-    all_day = supabase.table("appointments").select(
-        "token_number, appointment_time, status"
-    ).eq("doctor_id", doctor_id).eq("appointment_date", appt_date).execute().data or []
-    display_tok = get_display_token(token, appt_time, all_day)
+    # Display token (M1/E1…) for messages and response — fixed per slot
+    display_tok = get_display_token(token, appt_time)
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()
