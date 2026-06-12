@@ -341,20 +341,25 @@ def get_family_upcoming_appointments(mobile: str, doctor_id: str):
     ).eq("doctor_id", doctor_id).eq("status", "Confirmed").gte(
         "appointment_date", today
     ).in_("patient_id", list(all_patients.keys())).order("appointment_date").order(
-        "token_number"
+        "appointment_time"
     ).limit(10).execute()
 
-    # Get current in_progress token to filter out today's Done/In Progress
+    # Today's serving slot time — appointments at or before it can't be cancelled
     token_row = supabase.table("tokens").select("current_token").eq(
         "doctor_id", doctor_id).eq("queue_date", today).execute()
-    in_progress = (token_row.data[0]["current_token"] + 1) if token_row.data else 0
+    current = token_row.data[0]["current_token"] if token_row.data else 0
+    serving_time = ""
+    if current:
+        srow = supabase.table("appointments").select("appointment_time").eq(
+            "doctor_id", doctor_id).eq("appointment_date", today).eq(
+            "token_number", current).limit(1).execute()
+        serving_time = _time_str(srow.data[0]["appointment_time"]) if srow.data else ""
 
     appts = []
     for a in (result.data or []):
-        # For today: skip if token is already Done or In Progress
-        if a["appointment_date"] == today:
-            t = a.get("token_number") or 0
-            if t <= in_progress:
+        # For today: skip slots already seen or being seen
+        if a["appointment_date"] == today and serving_time:
+            if _time_str(a.get("appointment_time")) <= serving_time:
                 continue
         a["patient_name"] = all_patients.get(a["patient_id"], "Patient")
         appts.append(a)

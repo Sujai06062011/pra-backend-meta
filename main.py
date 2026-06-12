@@ -884,12 +884,37 @@ async def get_patient_visits(patient_id: str):
 
 # ── APPOINTMENTS ──────────────────────────────────────────
 def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
-    """Attach display_token (M1/E1…) to appointment rows — slot-position
-    based, computed from appointment_time. Never stored in the DB."""
+    """Attach display_token (M1/E1…) and time-order queue_status to rows.
+    Done/In Progress/Waiting follow slot time relative to the serving slot."""
+    dates = {a.get("appointment_date") for a in appointments if a.get("appointment_date")}
+    serving = {}  # date -> (current_token, serving_time)
+    for d in dates:
+        tk = supabase.table("tokens").select("current_token").eq(
+            "doctor_id", doctor_id).eq("queue_date", d).execute()
+        cur = tk.data[0]["current_token"] if tk.data else 0
+        st = ""
+        if cur:
+            row = supabase.table("appointments").select("appointment_time").eq(
+                "doctor_id", doctor_id).eq("appointment_date", d).eq(
+                "token_number", cur).limit(1).execute()
+            st = _time_str(row.data[0]["appointment_time"]) if row.data else ""
+        serving[d] = (cur, st)
+
     for a in appointments:
         a["display_token"] = get_display_token(
             a.get("token_number"), a.get("appointment_time")
         ) if a.get("appointment_time") else None
+
+        cur, st = serving.get(a.get("appointment_date"), (0, ""))
+        t = _time_str(a.get("appointment_time"))
+        if a.get("status") == "Cancelled":
+            a["queue_status"] = "Cancelled"
+        elif (cur and a.get("token_number") == cur) or a.get("status") == "In Progress":
+            a["queue_status"] = "In Progress"
+        elif a.get("status") == "Completed" or (st and t and t < st):
+            a["queue_status"] = "Done"
+        else:
+            a["queue_status"] = "Waiting"
     return appointments
 
 
@@ -897,7 +922,7 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
 async def today_appointments(doctor_id: str):
     from database import supabase
     today = date.today().isoformat()
-    result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).order("token_number", desc=False).execute()
+    result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).order("appointment_time", desc=False).execute()
     return _annotate_display_tokens(result.data or [], doctor_id)
 
 
@@ -911,7 +936,7 @@ async def list_appointments(doctor_id: str, date: str = "", date_from: str = "",
         q = q.eq("appointment_date", date)
     elif date_from and date_to:
         q = q.gte("appointment_date", date_from).lte("appointment_date", date_to)
-    result = q.order("appointment_date", desc=True).order("token_number", desc=False).limit(50).execute()
+    result = q.order("appointment_date", desc=True).order("appointment_time", desc=False).limit(50).execute()
     return _annotate_display_tokens(result.data or [], doctor_id)
 
 
@@ -933,7 +958,7 @@ async def queue_status(doctor_id: str, date: str = ""):
     token_row = supabase.table("tokens").select("current_token").eq("doctor_id", doctor_id).eq("queue_date", d).execute()
     current = token_row.data[0]["current_token"] if token_row.data else 0
 
-    appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).order("token_number", desc=False).execute()
+    appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).order("appointment_time", desc=False).execute()
     all_appts = appts.data or []
 
     # Self-heal stale queue session: if the token being served no longer exists
@@ -943,31 +968,30 @@ async def queue_status(doctor_id: str, date: str = ""):
         supabase.table("tokens").update({"current_token": 0}).eq(
             "doctor_id", doctor_id).eq("queue_date", d).execute()
 
-    # current_token = token being served right now (0 = queue not started).
-    # An appointment is "In Progress" only when its token == current_token.
+    # current_token identifies the appointment being served; progress through
+    # the queue follows slot TIME order (slot-position tokens), not int order.
+    curr_appt = next((a for a in all_appts if current and (a.get("token_number") or 0) == current), None)
+    serving_time = _time_str(curr_appt.get("appointment_time")) if curr_appt else ""
+
     for a in all_appts:
-        t = a.get("token_number") or 0
+        a["display_token"] = get_display_token(
+            a.get("token_number"), a.get("appointment_time")
+        ) if a.get("token_number") else None
+
+        t = _time_str(a.get("appointment_time"))
         if a.get("status") == "Cancelled":
             a["queue_status"] = "Cancelled"
-        elif current and t == current:
+        elif (current and a.get("token_number") == current) or a.get("status") == "In Progress":
             a["queue_status"] = "In Progress"
-        elif t and t < current:
+        elif a.get("status") == "Completed" or (serving_time and t and t < serving_time):
             a["queue_status"] = "Done"
         else:
             a["queue_status"] = "Waiting"
 
-    # Display tokens (M1/E1…) — computed against this same full-day list
-    for a in all_appts:
-        a["display_token"] = get_display_token(
-            a.get("token_number"), a.get("appointment_time"), all_appts
-        ) if a.get("token_number") else None
+    current_display = curr_appt["display_token"] if curr_appt else None
 
-    curr_appt = next((a for a in all_appts if (a.get("token_number") or 0) == current), None)
-    current_display = curr_appt["display_token"] if (current and curr_appt) else None
-
-    confirmed = [a for a in all_appts if a.get("status") == "Confirmed"]
-    seen    = [a for a in confirmed if (a.get("token_number") or 0) < current]
-    waiting = [a for a in confirmed if (a.get("token_number") or 0) > current]
+    waiting = [a for a in all_appts if a["queue_status"] == "Waiting"]
+    seen    = [a for a in all_appts if a["queue_status"] == "Done" and a.get("status") != "Cancelled"]
 
     return {
         "current_token": current,
