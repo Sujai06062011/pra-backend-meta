@@ -45,55 +45,94 @@ def _trim(t: Optional[str]) -> Optional[str]:
     return t[:5] if t else None
 
 
+def _get_day_schedule(doctor_id: str, day_name: str, cfg: dict) -> Optional[dict]:
+    """Fetch day-of-week schedule row, returns None if not configured."""
+    res = supabase.table("clinic_schedule") \
+        .select("*") \
+        .eq("doctor_id", doctor_id) \
+        .eq("day_of_week", day_name) \
+        .execute()
+    return res.data[0] if res.data else None
+
+
+def _resolve_from_schedule(sched: dict, cfg: dict, date_str: str) -> dict:
+    """Build availability dict from a clinic_schedule row."""
+    if sched.get("is_closed", False):
+        return {
+            "date": date_str,
+            "is_holiday": True,
+            "holiday_name": None,
+            "has_override": False,
+            "morning": {"enabled": False, "start": cfg["morning_start"], "end": cfg["morning_end"]},
+            "evening": {"enabled": False, "start": cfg["evening_start"], "end": cfg["evening_end"]},
+        }
+    return {
+        "date": date_str,
+        "is_holiday": False,
+        "holiday_name": None,
+        "has_override": False,
+        "morning": {
+            "enabled": bool(sched.get("morning_enabled", True)),
+            "start": _trim(sched.get("morning_start")) or cfg["morning_start"],
+            "end":   _trim(sched.get("morning_end"))   or cfg["morning_end"],
+        },
+        "evening": {
+            "enabled": bool(sched.get("evening_enabled", True)),
+            "start": _trim(sched.get("evening_start")) or cfg["evening_start"],
+            "end":   _trim(sched.get("evening_end"))   or cfg["evening_end"],
+        },
+    }
+
+
 def get_availability_for_date(doctor_id: str, date_str: str) -> dict:
     """
-    Core availability resolver. Returns a dict with date, is_holiday, morning, evening.
-    Uses clinic_config defaults wherever the override has NULL values.
-    Safe to call from WhatsApp handler, slot picker, and calendar view.
+    Core availability resolver. Three-tier precedence:
+      1. clinic_availability (per-date override) — highest
+      2. clinic_schedule (per-day-of-week defaults)
+      3. clinic_config (global defaults) — lowest
     """
     cfg = get_full_clinic_config(doctor_id)
 
+    # Tier 1: per-date override
     res = supabase.table("clinic_availability") \
         .select("*") \
         .eq("doctor_id", doctor_id) \
         .eq("availability_date", date_str) \
         .execute()
-
     row = res.data[0] if res.data else None
 
-    if not row:
+    if row:
         return {
             "date": date_str,
-            "is_holiday": False,
-            "holiday_name": None,
-            "has_override": False,
+            "is_holiday": bool(row.get("is_holiday", False)),
+            "holiday_name": row.get("holiday_name"),
+            "has_override": True,
             "morning": {
-                "enabled": True,
-                "start": cfg["morning_start"],
-                "end":   cfg["morning_end"],
+                "enabled": bool(row.get("morning_enabled", True)),
+                "start": _trim(row.get("morning_start")) or cfg["morning_start"],
+                "end":   _trim(row.get("morning_end"))   or cfg["morning_end"],
             },
             "evening": {
-                "enabled": True,
-                "start": cfg["evening_start"],
-                "end":   cfg["evening_end"],
+                "enabled": bool(row.get("evening_enabled", True)),
+                "start": _trim(row.get("evening_start")) or cfg["evening_start"],
+                "end":   _trim(row.get("evening_end"))   or cfg["evening_end"],
             },
         }
 
+    # Tier 2: day-of-week schedule
+    day_name = _date.fromisoformat(date_str).strftime("%A").lower()
+    sched = _get_day_schedule(doctor_id, day_name, cfg)
+    if sched:
+        return _resolve_from_schedule(sched, cfg, date_str)
+
+    # Tier 3: global clinic_config defaults
     return {
         "date": date_str,
-        "is_holiday": bool(row.get("is_holiday", False)),
-        "holiday_name": row.get("holiday_name"),
-        "has_override": True,
-        "morning": {
-            "enabled": bool(row.get("morning_enabled", True)),
-            "start": _trim(row.get("morning_start")) or cfg["morning_start"],
-            "end":   _trim(row.get("morning_end"))   or cfg["morning_end"],
-        },
-        "evening": {
-            "enabled": bool(row.get("evening_enabled", True)),
-            "start": _trim(row.get("evening_start")) or cfg["evening_start"],
-            "end":   _trim(row.get("evening_end"))   or cfg["evening_end"],
-        },
+        "is_holiday": False,
+        "holiday_name": None,
+        "has_override": False,
+        "morning": {"enabled": True, "start": cfg["morning_start"], "end": cfg["morning_end"]},
+        "evening": {"enabled": True, "start": cfg["evening_start"], "end": cfg["evening_end"]},
     }
 
 
@@ -163,17 +202,24 @@ async def get_availability_range(
     end_date:   str = Query(...),
     doctor_id:  str = Query(...),
 ):
-    """Get availability for a date range (calendar view)."""
+    """Get availability for a date range (calendar view). Respects 3-tier precedence."""
     cfg = get_full_clinic_config(doctor_id)
 
+    # Fetch per-date overrides
     res = supabase.table("clinic_availability") \
         .select("*") \
         .eq("doctor_id", doctor_id) \
         .gte("availability_date", start_date) \
         .lte("availability_date", end_date) \
         .execute()
-
     overrides = {r["availability_date"]: r for r in (res.data or [])}
+
+    # Fetch all day-of-week schedules (7 rows max)
+    sched_res = supabase.table("clinic_schedule") \
+        .select("*") \
+        .eq("doctor_id", doctor_id) \
+        .execute()
+    schedules = {r["day_of_week"]: r for r in (sched_res.data or [])}
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end   = datetime.strptime(end_date,   "%Y-%m-%d").date()
@@ -201,14 +247,19 @@ async def get_availability_range(
                 },
             })
         else:
-            results.append({
-                "date": date_str,
-                "is_holiday": False,
-                "holiday_name": None,
-                "has_override": False,
-                "morning": {"enabled": True, "start": cfg["morning_start"], "end": cfg["morning_end"]},
-                "evening": {"enabled": True, "start": cfg["evening_start"], "end": cfg["evening_end"]},
-            })
+            day_name = current.strftime("%A").lower()
+            sched = schedules.get(day_name)
+            if sched:
+                results.append(_resolve_from_schedule(sched, cfg, date_str))
+            else:
+                results.append({
+                    "date": date_str,
+                    "is_holiday": False,
+                    "holiday_name": None,
+                    "has_override": False,
+                    "morning": {"enabled": True, "start": cfg["morning_start"], "end": cfg["morning_end"]},
+                    "evening": {"enabled": True, "start": cfg["evening_start"], "end": cfg["evening_end"]},
+                })
         current += timedelta(days=1)
 
     return results

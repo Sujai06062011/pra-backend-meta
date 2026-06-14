@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
+from routers.schedule import router as schedule_router
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 import os
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(availability_router)
+app.include_router(schedule_router)
 
 # ── META CLOUD API (WhatsApp) ─────────────────────────────
 META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
