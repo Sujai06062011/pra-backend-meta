@@ -125,6 +125,13 @@ def get_availability_for_date(
         "duration":      int(all_cfg.get("clinic.slot_duration_minutes", "10")),
     }
 
+    # Per-day slot duration (falls back to global)
+    day_name = _date.fromisoformat(date_str).strftime("%A").lower()
+    p = f"clinic.schedule.{day_name}"
+    slot_duration = int(
+        all_cfg.get(f"{p}.slot_duration_minutes") or cfg["duration"]
+    )
+
     # Tier 1: per-date override
     res = supabase.table("clinic_availability") \
         .select("*") \
@@ -139,6 +146,7 @@ def get_availability_for_date(
             "is_holiday": bool(row.get("is_holiday", False)),
             "holiday_name": row.get("holiday_name"),
             "has_override": True,
+            "slot_duration_minutes": slot_duration,
             "morning": {
                 "enabled": bool(row.get("morning_enabled", True)),
                 "start": _trim(row.get("morning_start")) or cfg["morning_start"],
@@ -152,10 +160,11 @@ def get_availability_for_date(
         }
 
     # Tier 2: weekly schedule keys in clinic_config
-    day_name = _date.fromisoformat(date_str).strftime("%A").lower()
     sched = _day_sched_from_cfg(all_cfg, day_name, cfg)
     if sched:
-        return _resolve_from_schedule(sched, cfg, date_str)
+        result = _resolve_from_schedule(sched, cfg, date_str)
+        result["slot_duration_minutes"] = slot_duration
+        return result
 
     # Tier 3: global clinic_config defaults
     return {
@@ -163,6 +172,7 @@ def get_availability_for_date(
         "is_holiday": False,
         "holiday_name": None,
         "has_override": False,
+        "slot_duration_minutes": slot_duration,
         "morning": {"enabled": True, "start": cfg["morning_start"], "end": cfg["morning_end"]},
         "evening": {"enabled": True, "start": cfg["evening_start"], "end": cfg["evening_end"]},
     }

@@ -4,6 +4,7 @@ Reads/writes per-day schedule from clinic_config keys:
   clinic.schedule.{day}.enabled
   clinic.schedule.{day}.morning_enabled / morning_start / morning_end
   clinic.schedule.{day}.evening_enabled / evening_start / evening_end
+  clinic.schedule.{day}.slot_duration_minutes
 
 Global boundary keys (slot_start_morning etc.) act as max-allowed limits.
 """
@@ -38,14 +39,17 @@ def _build_response(cfg: dict) -> dict:
     me = cfg.get("clinic.slot_end_morning", "14:30")
     es = cfg.get("clinic.slot_start_evening", "17:00")
     ee = cfg.get("clinic.slot_end_evening", "22:00")
+    global_dur = int(cfg.get("clinic.slot_duration_minutes", "10"))
 
     schedule = {}
     for day in DAYS:
         p = f"clinic.schedule.{day}"
         default_open = "false" if day == "sunday" else "true"
         enabled = cfg.get(f"{p}.enabled", default_open) == "true"
+        dur = int(cfg.get(f"{p}.slot_duration_minutes") or global_dur)
         schedule[day] = {
             "enabled": enabled,
+            "slot_duration_minutes": dur,
             "morning": {
                 "enabled": cfg.get(f"{p}.morning_enabled", "true") == "true",
                 "start": (cfg.get(f"{p}.morning_start") or ms)[:5],
@@ -59,8 +63,6 @@ def _build_response(cfg: dict) -> dict:
         }
 
     return {
-        "slot_duration_minutes": int(cfg.get("clinic.slot_duration_minutes", "10")),
-        "max_per_slot": int(cfg.get("clinic.max_per_slot", "3")),
         "boundaries": {"morning_start": ms, "morning_end": me, "evening_start": es, "evening_end": ee},
         "schedule": schedule,
     }
@@ -78,7 +80,6 @@ async def get_day_schedule(day: str, doctor_id: str = Query(...)):
     resp = _build_response(_all_cfg(doctor_id))
     return {
         "day": day,
-        "slot_duration_minutes": resp["slot_duration_minutes"],
         "boundaries": resp["boundaries"],
         **resp["schedule"][day],
     }
@@ -93,13 +94,12 @@ class SessionIn(BaseModel):
 
 class DayIn(BaseModel):
     enabled: bool
+    slot_duration_minutes: int = 10
     morning: SessionIn
     evening: SessionIn
 
 class SchedulePutPayload(BaseModel):
     doctor_id: str
-    slot_duration_minutes: int
-    max_per_slot: int
     schedule: Dict[str, DayIn]
 
 
@@ -113,25 +113,22 @@ async def put_clinic_schedule(payload: SchedulePutPayload):
         "ee": cfg.get("clinic.slot_end_evening",   "22:00"),
     }
 
-    if payload.slot_duration_minutes <= 0:
-        return JSONResponse(status_code=400, content={"error": "Slot duration must be greater than 0."})
-    if payload.max_per_slot <= 0:
-        return JSONResponse(status_code=400, content={"error": "Max per slot must be greater than 0."})
-
     for day, ds in payload.schedule.items():
         if day not in DAYS:
             return JSONResponse(status_code=400, content={"error": f"Invalid day: {day}"})
+        if ds.slot_duration_minutes <= 0:
+            return JSONResponse(status_code=400, content={"error": f"{day.title()} slot duration must be > 0."})
         if not ds.enabled:
             continue
         if ds.morning.enabled:
             ms2, me2 = ds.morning.start[:5], ds.morning.end[:5]
             if _t2m(ms2) < _t2m(b["ms"]):
                 return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} morning start cannot be before clinic boundary {b['ms']}."
+                    "error": f"{day.title()} morning start cannot be before {b['ms']}."
                 })
             if _t2m(me2) > _t2m(b["me"]):
                 return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} morning end cannot be after clinic boundary {b['me']}."
+                    "error": f"{day.title()} morning end cannot be after {b['me']}."
                 })
             if _t2m(ms2) >= _t2m(me2):
                 return JSONResponse(status_code=400, content={
@@ -141,11 +138,11 @@ async def put_clinic_schedule(payload: SchedulePutPayload):
             es2, ee2 = ds.evening.start[:5], ds.evening.end[:5]
             if _t2m(es2) < _t2m(b["es"]):
                 return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} evening start cannot be before clinic boundary {b['es']}."
+                    "error": f"{day.title()} evening start cannot be before {b['es']}."
                 })
             if _t2m(ee2) > _t2m(b["ee"]):
                 return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} evening end cannot be after clinic boundary {b['ee']}."
+                    "error": f"{day.title()} evening end cannot be after {b['ee']}."
                 })
             if _t2m(es2) >= _t2m(ee2):
                 return JSONResponse(status_code=400, content={
@@ -153,17 +150,14 @@ async def put_clinic_schedule(payload: SchedulePutPayload):
                 })
 
     now = datetime.utcnow().isoformat()
-    rows = [
-        {"doctor_id": payload.doctor_id, "config_key": "clinic.slot_duration_minutes",
-         "config_value": str(payload.slot_duration_minutes), "updated_at": now},
-        {"doctor_id": payload.doctor_id, "config_key": "clinic.max_per_slot",
-         "config_value": str(payload.max_per_slot), "updated_at": now},
-    ]
+    rows = []
     for day, ds in payload.schedule.items():
         p = f"clinic.schedule.{day}"
         rows += [
             {"doctor_id": payload.doctor_id, "config_key": f"{p}.enabled",
              "config_value": "true" if ds.enabled else "false", "updated_at": now},
+            {"doctor_id": payload.doctor_id, "config_key": f"{p}.slot_duration_minutes",
+             "config_value": str(ds.slot_duration_minutes), "updated_at": now},
             {"doctor_id": payload.doctor_id, "config_key": f"{p}.morning_enabled",
              "config_value": "true" if ds.morning.enabled else "false", "updated_at": now},
             {"doctor_id": payload.doctor_id, "config_key": f"{p}.morning_start",

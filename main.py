@@ -1935,7 +1935,7 @@ async def get_appointment_slots(doctor_id: str, date: str):
 
     # Respect availability overrides
     av = get_availability_for_date(doctor_id, date)
-    dur = cfg_full["duration"]
+    dur = av.get("slot_duration_minutes") or cfg_full["duration"]
 
     def parse_t(s):
         h, m_ = map(int, s.split(":"))
