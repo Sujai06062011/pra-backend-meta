@@ -45,14 +45,33 @@ def _trim(t: Optional[str]) -> Optional[str]:
     return t[:5] if t else None
 
 
-def _get_day_schedule(doctor_id: str, day_name: str, cfg: dict) -> Optional[dict]:
-    """Fetch day-of-week schedule row, returns None if not configured."""
-    res = supabase.table("clinic_schedule") \
-        .select("*") \
+def _fetch_all_clinic_config(doctor_id: str) -> dict:
+    """Fetch ALL clinic_config rows as a flat key→value dict."""
+    res = supabase.table("clinic_config") \
+        .select("config_key,config_value") \
         .eq("doctor_id", doctor_id) \
-        .eq("day_of_week", day_name) \
         .execute()
-    return res.data[0] if res.data else None
+    return {r["config_key"]: r["config_value"] for r in (res.data or [])}
+
+
+def _day_sched_from_cfg(all_cfg: dict, day_name: str, cfg: dict) -> Optional[dict]:
+    """
+    Extract day-of-week schedule from clinic_config keys.
+    Returns None if no schedule keys found for this day (falls through to global defaults).
+    """
+    p = f"clinic.schedule.{day_name}"
+    if f"{p}.enabled" not in all_cfg:
+        return None
+    enabled = all_cfg[f"{p}.enabled"] == "true"
+    return {
+        "is_closed": not enabled,
+        "morning_enabled": all_cfg.get(f"{p}.morning_enabled", "true") == "true",
+        "morning_start": (all_cfg.get(f"{p}.morning_start") or cfg["morning_start"])[:5],
+        "morning_end":   (all_cfg.get(f"{p}.morning_end")   or cfg["morning_end"])[:5],
+        "evening_enabled": all_cfg.get(f"{p}.evening_enabled", "true") == "true",
+        "evening_start": (all_cfg.get(f"{p}.evening_start") or cfg["evening_start"])[:5],
+        "evening_end":   (all_cfg.get(f"{p}.evening_end")   or cfg["evening_end"])[:5],
+    }
 
 
 def _resolve_from_schedule(sched: dict, cfg: dict, date_str: str) -> dict:
@@ -84,14 +103,27 @@ def _resolve_from_schedule(sched: dict, cfg: dict, date_str: str) -> dict:
     }
 
 
-def get_availability_for_date(doctor_id: str, date_str: str) -> dict:
+def get_availability_for_date(
+    doctor_id: str,
+    date_str: str,
+    _all_cfg: Optional[dict] = None,
+) -> dict:
     """
     Core availability resolver. Three-tier precedence:
       1. clinic_availability (per-date override) — highest
-      2. clinic_schedule (per-day-of-week defaults)
-      3. clinic_config (global defaults) — lowest
+      2. clinic_config schedule keys (per-day-of-week defaults)
+      3. clinic_config global defaults — lowest
+
+    Pass _all_cfg to reuse a pre-fetched config dict (avoids extra DB calls in loops).
     """
-    cfg = get_full_clinic_config(doctor_id)
+    all_cfg = _all_cfg if _all_cfg is not None else _fetch_all_clinic_config(doctor_id)
+    cfg = {
+        "morning_start": (all_cfg.get("clinic.slot_start_morning") or "09:30")[:5],
+        "morning_end":   (all_cfg.get("clinic.slot_end_morning")   or "14:30")[:5],
+        "evening_start": (all_cfg.get("clinic.slot_start_evening") or "17:00")[:5],
+        "evening_end":   (all_cfg.get("clinic.slot_end_evening")   or "22:00")[:5],
+        "duration":      int(all_cfg.get("clinic.slot_duration_minutes", "10")),
+    }
 
     # Tier 1: per-date override
     res = supabase.table("clinic_availability") \
@@ -119,9 +151,9 @@ def get_availability_for_date(doctor_id: str, date_str: str) -> dict:
             },
         }
 
-    # Tier 2: day-of-week schedule
+    # Tier 2: weekly schedule keys in clinic_config
     day_name = _date.fromisoformat(date_str).strftime("%A").lower()
-    sched = _get_day_schedule(doctor_id, day_name, cfg)
+    sched = _day_sched_from_cfg(all_cfg, day_name, cfg)
     if sched:
         return _resolve_from_schedule(sched, cfg, date_str)
 
@@ -141,10 +173,11 @@ def get_next_open_date(doctor_id: str, from_date_str: str) -> Optional[str]:
     Find the first non-holiday date with at least one session enabled,
     starting from from_date_str (exclusive), up to 14 days ahead.
     """
+    all_cfg = _fetch_all_clinic_config(doctor_id)
     start = datetime.strptime(from_date_str, "%Y-%m-%d").date()
     for i in range(1, 15):
         candidate = (start + timedelta(days=i)).isoformat()
-        av = get_availability_for_date(doctor_id, candidate)
+        av = get_availability_for_date(doctor_id, candidate, _all_cfg=all_cfg)
         if not av["is_holiday"] and (av["morning"]["enabled"] or av["evening"]["enabled"]):
             return candidate
     return None
@@ -203,9 +236,16 @@ async def get_availability_range(
     doctor_id:  str = Query(...),
 ):
     """Get availability for a date range (calendar view). Respects 3-tier precedence."""
-    cfg = get_full_clinic_config(doctor_id)
+    all_cfg = _fetch_all_clinic_config(doctor_id)
+    cfg = {
+        "morning_start": (all_cfg.get("clinic.slot_start_morning") or "09:30")[:5],
+        "morning_end":   (all_cfg.get("clinic.slot_end_morning")   or "14:30")[:5],
+        "evening_start": (all_cfg.get("clinic.slot_start_evening") or "17:00")[:5],
+        "evening_end":   (all_cfg.get("clinic.slot_end_evening")   or "22:00")[:5],
+        "duration":      int(all_cfg.get("clinic.slot_duration_minutes", "10")),
+    }
 
-    # Fetch per-date overrides
+    # Fetch per-date overrides for range
     res = supabase.table("clinic_availability") \
         .select("*") \
         .eq("doctor_id", doctor_id) \
@@ -213,13 +253,6 @@ async def get_availability_range(
         .lte("availability_date", end_date) \
         .execute()
     overrides = {r["availability_date"]: r for r in (res.data or [])}
-
-    # Fetch all day-of-week schedules (7 rows max)
-    sched_res = supabase.table("clinic_schedule") \
-        .select("*") \
-        .eq("doctor_id", doctor_id) \
-        .execute()
-    schedules = {r["day_of_week"]: r for r in (sched_res.data or [])}
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end   = datetime.strptime(end_date,   "%Y-%m-%d").date()
@@ -248,7 +281,7 @@ async def get_availability_range(
             })
         else:
             day_name = current.strftime("%A").lower()
-            sched = schedules.get(day_name)
+            sched = _day_sched_from_cfg(all_cfg, day_name, cfg)
             if sched:
                 results.append(_resolve_from_schedule(sched, cfg, date_str))
             else:
