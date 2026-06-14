@@ -26,9 +26,22 @@ IST = pytz.timezone("Asia/Kolkata")
 
 app = FastAPI(title="PRA - Patient Relationship Assistant")
 
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://pra-frontend.vercel.app",  # ADD THIS
+        "https://pra-frontend-sujai06062011.vercel.app"  # ADD THIS
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
