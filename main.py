@@ -574,12 +574,42 @@ async def get_config(doctor_id: str):
     return result.data or []
 
 
+SLOT_SENSITIVE_KEYS = {
+    "clinic.slot_start_morning",
+    "clinic.slot_end_morning",
+    "clinic.slot_start_evening",
+    "clinic.slot_end_evening",
+    "clinic.slot_duration_minutes",
+}
+
 @app.patch("/config/{doctor_id}/{config_key}")
 async def update_config(doctor_id: str, config_key: str, request: Request):
     """Upsert a single config key for a doctor."""
     import datetime as dt
+    from fastapi.responses import JSONResponse
     body = await request.json()
     config_value = body.get("config_value", "")
+
+    # Guard: block slot-related changes when active appointments exist today or in future
+    if config_key in SLOT_SENSITIVE_KEYS:
+        today = dt.date.today().isoformat()
+        active = config_loader._sb.table("appointments")\
+            .select("id", count="exact")\
+            .eq("doctor_id", doctor_id)\
+            .gte("appointment_date", today)\
+            .in_("status", ["Confirmed", "In Progress"])\
+            .execute()
+        count = active.count or 0
+        if count > 0:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "active_appointments",
+                    "message": f"Cannot change slot settings — {count} active appointment{'s' if count != 1 else ''} exist{'s' if count == 1 else ''} today or in future. Cancel or complete them first.",
+                    "count": count,
+                }
+            )
+
     result = config_loader._sb.table("clinic_config").upsert({
         "doctor_id": doctor_id,
         "config_key": config_key,
