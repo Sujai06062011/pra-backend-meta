@@ -200,12 +200,8 @@ async def send_morning_reminders():
     patients_medicines = get_active_medicines_by_patient("morning")
     print(f"Found {len(patients_medicines)} patients with active medicines")
 
-    sent_mobiles = set()
     for patient_id, data in patients_medicines.items():
         mobile = data["mobile"]
-        if mobile in sent_mobiles:
-            continue
-        sent_mobiles.add(mobile)
         message = build_morning_message(data)
         await send_whatsapp(mobile, message)
         print(f"✅ Morning reminder sent to {data['patient_name']} ({mobile})")
@@ -228,12 +224,8 @@ async def send_evening_reminders():
 
     print(f"Found {len(night_patients)} patients with night medicines")
 
-    sent_mobiles = set()
     for patient_id, data in night_patients.items():
         mobile = data["mobile"]
-        if mobile in sent_mobiles:
-            continue
-        sent_mobiles.add(mobile)
         message = build_evening_message(data)
         await send_whatsapp(mobile, message)
         print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
