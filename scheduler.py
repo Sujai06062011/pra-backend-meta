@@ -32,12 +32,11 @@ async def send_whatsapp(to_number: str, message: str):
 
 def get_active_medicines_by_patient(reminder_type: str = "morning"):
     """
-    Fetch all active medicines grouped by patient.
+    Fetch all active medicines grouped by patient_id.
     reminder_type: "morning" = all medicines, "evening" = night medicines only
-    Returns: dict of {mobile: {patient_info, medicines: []}}
+    Returns: dict of {patient_id: {mobile, patient_info, medicines: []}}
     """
     today = date.today()
-    today_str = today.isoformat()
 
     # Fetch all prescriptions with medicines and patient info
     result = supabase.table("prescriptions").select(
@@ -50,20 +49,22 @@ def get_active_medicines_by_patient(reminder_type: str = "morning"):
 
     prescriptions = result.data or []
 
-    # Group active medicines by patient mobile
+    # Group active medicines by patient_id (not mobile) to avoid merging
+    # different patients who share the same test/family phone number.
     patients_medicines = {}
 
     for pres in prescriptions:
         patient = pres.get("patients") or {}
         doctor = pres.get("doctors") or {}
         medicines = pres.get("prescription_medicines", [])
+        patient_id = pres.get("patient_id", "")
         mobile = patient.get("mobile", "")
         patient_name = patient.get("name", "")
         clinic_name = doctor.get("clinic_name", "Clinic")
         pres_date_str = pres.get("prescription_date", "")
         dietary = pres.get("dietary_instructions", "")
 
-        if not mobile or not medicines or not pres_date_str:
+        if not patient_id or not mobile or not medicines or not pres_date_str:
             continue
 
         pres_date = datetime.strptime(pres_date_str, "%Y-%m-%d").date()
@@ -81,8 +82,9 @@ def get_active_medicines_by_patient(reminder_type: str = "morning"):
             if reminder_type == "evening" and not med.get("night"):
                 continue
 
-            if mobile not in patients_medicines:
-                patients_medicines[mobile] = {
+            if patient_id not in patients_medicines:
+                patients_medicines[patient_id] = {
+                    "mobile": mobile,
                     "patient_name": patient_name,
                     "clinic_name": clinic_name,
                     "dietary": dietary,
@@ -95,22 +97,22 @@ def get_active_medicines_by_patient(reminder_type: str = "morning"):
 
             # Categorize medicine by timing
             if med.get("morning"):
-                patients_medicines[mobile]["morning"].append(med)
+                patients_medicines[patient_id]["morning"].append(med)
             if med.get("afternoon"):
-                patients_medicines[mobile]["afternoon"].append(med)
+                patients_medicines[patient_id]["afternoon"].append(med)
             if med.get("evening"):
-                patients_medicines[mobile]["evening"].append(med)
+                patients_medicines[patient_id]["evening"].append(med)
             if med.get("night"):
-                patients_medicines[mobile]["night"].append(med)
+                patients_medicines[patient_id]["night"].append(med)
 
             # Update dietary if available
-            if dietary and not patients_medicines[mobile]["dietary"]:
-                patients_medicines[mobile]["dietary"] = dietary
+            if dietary and not patients_medicines[patient_id]["dietary"]:
+                patients_medicines[patient_id]["dietary"] = dietary
 
     return patients_medicines
 
 
-def build_morning_message(mobile: str, data: dict) -> str:
+def build_morning_message(data: dict) -> str:
     """Build full day medicine summary message"""
     patient_name = data["patient_name"]
     clinic_name = data["clinic_name"]
@@ -163,7 +165,7 @@ def build_morning_message(mobile: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-def build_evening_message(mobile: str, data: dict) -> str:
+def build_evening_message(data: dict) -> str:
     """Build night medicine reminder message"""
     patient_name = data["patient_name"]
     clinic_name = data["clinic_name"]
@@ -198,8 +200,13 @@ async def send_morning_reminders():
     patients_medicines = get_active_medicines_by_patient("morning")
     print(f"Found {len(patients_medicines)} patients with active medicines")
 
-    for mobile, data in patients_medicines.items():
-        message = build_morning_message(mobile, data)
+    sent_mobiles = set()
+    for patient_id, data in patients_medicines.items():
+        mobile = data["mobile"]
+        if mobile in sent_mobiles:
+            continue
+        sent_mobiles.add(mobile)
+        message = build_morning_message(data)
         await send_whatsapp(mobile, message)
         print(f"✅ Morning reminder sent to {data['patient_name']} ({mobile})")
 
@@ -215,14 +222,19 @@ async def send_evening_reminders():
 
     # Filter only patients who have night medicines
     night_patients = {
-        mobile: data for mobile, data in patients_medicines.items()
+        pid: data for pid, data in patients_medicines.items()
         if data["night"]
     }
 
     print(f"Found {len(night_patients)} patients with night medicines")
 
-    for mobile, data in night_patients.items():
-        message = build_evening_message(mobile, data)
+    sent_mobiles = set()
+    for patient_id, data in night_patients.items():
+        mobile = data["mobile"]
+        if mobile in sent_mobiles:
+            continue
+        sent_mobiles.add(mobile)
+        message = build_evening_message(data)
         await send_whatsapp(mobile, message)
         print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
 
