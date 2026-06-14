@@ -1059,6 +1059,101 @@ async def update_appointment_status(appointment_id: str, request: Request):
     return result.data[0] if result.data else {}
 
 
+@app.post("/appointments/{appointment_id}/no-show")
+async def mark_no_show(appointment_id: str, request: Request):
+    from database import supabase
+    import datetime as dt
+    body = await request.json()
+    send_whatsapp: bool = body.get("send_whatsapp", False)
+
+    # 1. Fetch appointment + patient
+    appt_row = supabase.table("appointments").select("*, patients(*)").eq("id", appointment_id).execute()
+    if not appt_row.data:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    appt = appt_row.data[0]
+
+    # 2. Update status
+    supabase.table("appointments").update({"status": "No-Show"}).eq("id", appointment_id).execute()
+
+    patient     = appt.get("patients") or {}
+    patient_id  = appt.get("patient_id", "")
+    doctor_id   = appt.get("doctor_id", "")
+    appt_date   = appt.get("appointment_date", "")
+    appt_time   = appt.get("appointment_time", "")
+    mobile      = patient.get("mobile", "")
+    patient_name = patient.get("name", "Patient")
+    first_name  = patient_name.split()[0] if patient_name else "there"
+
+    # Format time for messages
+    time_str = ""
+    if appt_time:
+        try:
+            h = int(appt_time[:2]); m = appt_time[3:5]
+            h12 = h % 12 or 12; ampm = "PM" if h >= 12 else "AM"
+            time_str = f"{h12}:{m} {ampm}"
+        except Exception:
+            time_str = appt_time
+
+    # Fetch clinic/doctor name
+    clinic_name = "the clinic"
+    doctor_name = "the doctor"
+    try:
+        doc_row = supabase.table("doctors").select("clinic_name, name").eq("id", doctor_id).execute()
+        if doc_row.data:
+            clinic_name = doc_row.data[0].get("clinic_name") or clinic_name
+            doctor_name = doc_row.data[0].get("name") or doctor_name
+    except Exception:
+        pass
+
+    # 3. WhatsApp notification
+    whatsapp_sent = False
+    if send_whatsapp and mobile:
+        msg = (
+            f"Hi {first_name} 👋\n\n"
+            f"We noticed you missed your appointment with {doctor_name} today"
+            + (f" at {time_str}" if time_str else "")
+            + ".\n\n"
+            f"We hope everything is okay 🙏\n\n"
+            f"Please reply to this message to reschedule your appointment at your convenience.\n\n"
+            f"— {clinic_name} Team"
+        )
+        try:
+            await send_meta_text(mobile, msg)
+            whatsapp_sent = True
+        except Exception as e:
+            print(f"[no-show] WhatsApp failed for {appointment_id}: {e}")
+
+    # 4. Create followup record
+    followup_created = False
+    today = dt.date.today().isoformat()
+    notes = f"Patient did not show up for appointment on {appt_date}"
+    if time_str:
+        notes += f" at {time_str}"
+    notes += ". Call to reschedule."
+    try:
+        supabase.table("followups").insert({
+            "patient_id":     patient_id,
+            "doctor_id":      doctor_id,
+            "appointment_id": appointment_id,
+            "scheduled_date": today,
+            "channel":        "call",
+            "call_status":    "Pending",
+            "notes":          notes,
+        }).execute()
+        followup_created = True
+    except Exception as e:
+        print(f"[no-show] Followup insert failed for {appointment_id}: {e}")
+
+    return {
+        "success":          True,
+        "appointment_id":   appointment_id,
+        "status":           "No-Show",
+        "whatsapp_sent":    whatsapp_sent,
+        "followup_created": followup_created,
+    }
+
+
 @app.post("/appointments/bulk-cancel")
 async def bulk_cancel_appointments(request: Request):
     from database import supabase
