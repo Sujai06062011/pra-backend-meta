@@ -1074,15 +1074,16 @@ async def bulk_cancel_appointments(request: Request):
 
     for appt_id in appointment_ids:
         try:
-            row = supabase.table("appointments").update({
+            upd = supabase.table("appointments").update({
                 "status": "Cancelled",
                 "cancellation_reason": reason,
-            }).eq("id", appt_id).select("*, patients(*)").execute()
-            if not row.data:
+            }).eq("id", appt_id).execute()
+            if not upd.data:
                 failed.append(appt_id)
                 continue
             cancelled.append(appt_id)
-            appt = row.data[0]
+            row = supabase.table("appointments").select("*, patients(*)").eq("id", appt_id).execute()
+            appt = row.data[0] if row.data else {}
 
             if notify_whatsapp:
                 patient = appt.get("patients") or {}
