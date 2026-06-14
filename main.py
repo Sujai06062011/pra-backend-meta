@@ -1947,7 +1947,11 @@ async def get_appointment_slots(doctor_id: str, date: str):
             t += timedelta(minutes=dur)
         return slots
 
-    all_slots = gen_slots(start_m, end_m) + gen_slots(start_e, end_e)
+    morning_slot_times = gen_slots(start_m, end_m)
+    evening_slot_times = gen_slots(start_e, end_e)
+    slot_sessions = {t: "morning" for t in morning_slot_times}
+    slot_sessions.update({t: "evening" for t in evening_slot_times})
+    all_slots = morning_slot_times + evening_slot_times
 
     # Count occupied slots — only Cancelled frees a slot
     appts_res = supabase.table("appointments")\
@@ -1976,6 +1980,7 @@ async def get_appointment_slots(doctor_id: str, date: str):
         {
             "time":         slot,
             "display":      display_time(slot),
+            "session":      slot_sessions[slot],
             "booked_count": booked_counts.get(slot, 0),
             "max":          max_slot,
             "past":         bool(past_cutoff) and slot <= past_cutoff,
