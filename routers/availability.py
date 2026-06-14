@@ -336,39 +336,13 @@ async def set_availability(payload: AvailabilityPayload):
     if payload.availability_date < today:
         return JSONResponse(status_code=400, content={"error": "Cannot set availability for past dates."})
 
-    cfg = get_full_clinic_config(payload.doctor_id)
-
     if not payload.is_holiday:
-        if payload.morning_enabled:
-            ms = payload.morning_start or cfg["morning_start"]
-            me = payload.morning_end   or cfg["morning_end"]
-            if _t2m(ms) < _t2m(cfg["morning_start"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"Morning start time cannot be before clinic hours ({cfg['morning_start']}). "
-                             f"Please select a time between {cfg['morning_start']} and {cfg['morning_end']}."
-                })
-            if _t2m(me) > _t2m(cfg["morning_end"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"Morning end time cannot be after clinic hours ({cfg['morning_end']}). "
-                             f"Please select a time between {cfg['morning_start']} and {cfg['morning_end']}."
-                })
-            if _t2m(ms) >= _t2m(me):
+        if payload.morning_enabled and payload.morning_start and payload.morning_end:
+            if _t2m(payload.morning_start) >= _t2m(payload.morning_end):
                 return JSONResponse(status_code=400, content={"error": "Morning start time must be before end time."})
 
-        if payload.evening_enabled:
-            es = payload.evening_start or cfg["evening_start"]
-            ee = payload.evening_end   or cfg["evening_end"]
-            if _t2m(es) < _t2m(cfg["evening_start"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"Evening start time cannot be before clinic hours ({cfg['evening_start']}). "
-                             f"Please select a time between {cfg['evening_start']} and {cfg['evening_end']}."
-                })
-            if _t2m(ee) > _t2m(cfg["evening_end"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"Evening end time cannot be after clinic hours ({cfg['evening_end']}). "
-                             f"Please select a time between {cfg['evening_start']} and {cfg['evening_end']}."
-                })
-            if _t2m(es) >= _t2m(ee):
+        if payload.evening_enabled and payload.evening_start and payload.evening_end:
+            if _t2m(payload.evening_start) >= _t2m(payload.evening_end):
                 return JSONResponse(status_code=400, content={"error": "Evening start time must be before end time."})
 
     now = datetime.utcnow().isoformat()
