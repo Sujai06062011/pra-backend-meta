@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
+from routers.availability import router as availability_router
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 import os
@@ -30,6 +31,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(availability_router)
 
 # ── META CLOUD API (WhatsApp) ─────────────────────────────
 META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
@@ -1912,48 +1915,45 @@ async def trigger_followup_calls():
 
 @app.get("/appointments/slots")
 async def get_appointment_slots(doctor_id: str, date: str):
-    """Return time slots with booking counts for a given date."""
+    """Return time slots with booking counts for a given date, respecting availability overrides."""
     from database import supabase
     from datetime import datetime, timedelta
+    from routers.availability import get_availability_for_date, get_full_clinic_config
 
     # Load clinic config
-    cfg_res = supabase.table("clinic_config")\
-        .select("config_key,config_value")\
+    cfg_full = get_full_clinic_config(doctor_id)
+    max_slot_res = supabase.table("clinic_config")\
+        .select("config_value")\
         .eq("doctor_id", doctor_id)\
-        .in_("config_key", [
-            "clinic.slot_start_morning", "clinic.slot_end_morning",
-            "clinic.slot_start_evening", "clinic.slot_end_evening",
-            "clinic.slot_duration_minutes", "clinic.max_per_slot",
-        ]).execute()
-    cfg = {r["config_key"]: r["config_value"] for r in (cfg_res.data or [])}
+        .eq("config_key", "clinic.max_per_slot")\
+        .execute()
+    max_slot = int((max_slot_res.data[0]["config_value"] if max_slot_res.data else None) or 3)
 
-    start_m  = cfg.get("clinic.slot_start_morning",   "09:00")
-    end_m    = cfg.get("clinic.slot_end_morning",     "13:00")
-    start_e  = cfg.get("clinic.slot_start_evening",   "17:00")
-    end_e    = cfg.get("clinic.slot_end_evening",     "20:00")
-    dur      = int(cfg.get("clinic.slot_duration_minutes", "15"))
-    max_slot = int(cfg.get("clinic.max_per_slot",          "3"))
+    # Respect availability overrides
+    av = get_availability_for_date(doctor_id, date)
+    dur = cfg_full["duration"]
 
     def parse_t(s):
         h, m_ = map(int, s.split(":"))
         return datetime(2000, 1, 1, h, m_)
 
-    def gen_slots(start_str, end_str):
-        slots = []
+    def gen_slots(start_str, end_str, session: str):
+        result_slots = []
         t = parse_t(start_str)
         end = parse_t(end_str)
         while t < end:
-            slots.append(t.strftime("%H:%M"))
+            result_slots.append((t.strftime("%H:%M"), session))
             t += timedelta(minutes=dur)
-        return slots
+        return result_slots
 
-    morning_slot_times = gen_slots(start_m, end_m)
-    evening_slot_times = gen_slots(start_e, end_e)
-    slot_sessions = {t: "morning" for t in morning_slot_times}
-    slot_sessions.update({t: "evening" for t in evening_slot_times})
-    all_slots = morning_slot_times + evening_slot_times
+    all_slots = []
+    if not av["is_holiday"]:
+        if av["morning"]["enabled"]:
+            all_slots += gen_slots(av["morning"]["start"], av["morning"]["end"], "morning")
+        if av["evening"]["enabled"]:
+            all_slots += gen_slots(av["evening"]["start"], av["evening"]["end"], "evening")
 
-    # Count occupied slots — only Cancelled frees a slot
+    # Count occupied slots
     appts_res = supabase.table("appointments")\
         .select("appointment_time")\
         .eq("doctor_id", doctor_id)\
@@ -1972,22 +1972,27 @@ async def get_appointment_slots(doctor_id: str, date: str):
         if h12 == 0: h12 = 12
         return f"{h12}:{m_:02d} {suffix}"
 
-    # For today, slots whose time has already passed are not bookable
     now_ist = datetime.now(IST)
     past_cutoff = now_ist.strftime("%H:%M") if date == now_ist.date().isoformat() else ""
 
-    return [
-        {
-            "time":         slot,
-            "display":      display_time(slot),
-            "session":      slot_sessions[slot],
-            "booked_count": booked_counts.get(slot, 0),
-            "max":          max_slot,
-            "past":         bool(past_cutoff) and slot <= past_cutoff,
-            "available":    booked_counts.get(slot, 0) == 0 and not (past_cutoff and slot <= past_cutoff),
-        }
-        for slot in all_slots
-    ]
+    return {
+        "is_holiday": av["is_holiday"],
+        "holiday_name": av.get("holiday_name"),
+        "morning_enabled": av["morning"]["enabled"],
+        "evening_enabled": av["evening"]["enabled"],
+        "slots": [
+            {
+                "time":         slot,
+                "display":      display_time(slot),
+                "session":      session,
+                "booked_count": booked_counts.get(slot, 0),
+                "max":          max_slot,
+                "past":         bool(past_cutoff) and slot <= past_cutoff,
+                "available":    booked_counts.get(slot, 0) == 0 and not (past_cutoff and slot <= past_cutoff),
+            }
+            for slot, session in all_slots
+        ],
+    }
 
 
 @app.get("/appointments/next-token")
