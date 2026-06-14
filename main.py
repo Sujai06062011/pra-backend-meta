@@ -480,8 +480,10 @@ async def write_prescription(request: Request):
     if med_rows:
         db.table("prescription_medicines").insert(med_rows).execute()
 
-    # 5. Create followup record (7 days from today — WhatsApp channel)
-    followup_date = (now_ist.date() + dt.timedelta(days=7)).isoformat()
+    # 5. Create followup record (days from today driven by clinic.followup_days config)
+    _fu_cfg = supabase.table("clinic_config").select("config_value").eq("doctor_id", doctor_id_req).eq("config_key", "clinic.followup_days").execute()
+    _fu_days = int((_fu_cfg.data[0]["config_value"] if _fu_cfg.data else None) or 7)
+    followup_date = (now_ist.date() + dt.timedelta(days=_fu_days)).isoformat()
     try:
         db.table("followups").insert({
             "patient_id":    patient_id,
@@ -1658,7 +1660,9 @@ async def create_prescription_v2(request: Request):
 
     # Auto followup if patient linked
     if patient_id:
-        followup_date = (now_ist.date() + dt.timedelta(days=7)).isoformat()
+        _fu_cfg = db.table("clinic_config").select("config_value").eq("doctor_id", doctor_id_req).eq("config_key", "clinic.followup_days").execute()
+        _fu_days = int((_fu_cfg.data[0]["config_value"] if _fu_cfg.data else None) or 7)
+        followup_date = (now_ist.date() + dt.timedelta(days=_fu_days)).isoformat()
         try:
             db.table("followups").insert({
                 "patient_id":     patient_id,
