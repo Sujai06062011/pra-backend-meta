@@ -105,14 +105,6 @@ class SchedulePutPayload(BaseModel):
 
 @router.put("/schedule")
 async def put_clinic_schedule(payload: SchedulePutPayload):
-    cfg = _all_cfg(payload.doctor_id)
-    b = {
-        "ms": cfg.get("clinic.slot_start_morning", "09:30"),
-        "me": cfg.get("clinic.slot_end_morning",   "14:30"),
-        "es": cfg.get("clinic.slot_start_evening", "17:00"),
-        "ee": cfg.get("clinic.slot_end_evening",   "22:00"),
-    }
-
     for day, ds in payload.schedule.items():
         if day not in DAYS:
             return JSONResponse(status_code=400, content={"error": f"Invalid day: {day}"})
@@ -120,34 +112,10 @@ async def put_clinic_schedule(payload: SchedulePutPayload):
             return JSONResponse(status_code=400, content={"error": f"{day.title()} slot duration must be > 0."})
         if not ds.enabled:
             continue
-        if ds.morning.enabled:
-            ms2, me2 = ds.morning.start[:5], ds.morning.end[:5]
-            if _t2m(ms2) < _t2m(b["ms"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} morning start cannot be before {b['ms']}."
-                })
-            if _t2m(me2) > _t2m(b["me"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} morning end cannot be after {b['me']}."
-                })
-            if _t2m(ms2) >= _t2m(me2):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} morning start must be before end time."
-                })
-        if ds.evening.enabled:
-            es2, ee2 = ds.evening.start[:5], ds.evening.end[:5]
-            if _t2m(es2) < _t2m(b["es"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} evening start cannot be before {b['es']}."
-                })
-            if _t2m(ee2) > _t2m(b["ee"]):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} evening end cannot be after {b['ee']}."
-                })
-            if _t2m(es2) >= _t2m(ee2):
-                return JSONResponse(status_code=400, content={
-                    "error": f"{day.title()} evening start must be before end time."
-                })
+        if ds.morning.enabled and _t2m(ds.morning.start) >= _t2m(ds.morning.end):
+            return JSONResponse(status_code=400, content={"error": f"{day.title()} morning start must be before end time."})
+        if ds.evening.enabled and _t2m(ds.evening.start) >= _t2m(ds.evening.end):
+            return JSONResponse(status_code=400, content={"error": f"{day.title()} evening start must be before end time."})
 
     now = datetime.utcnow().isoformat()
     rows = []
