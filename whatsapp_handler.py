@@ -519,57 +519,52 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             new_state = current_state
             new_temp  = temp_data
         else:
-            date_obj = datetime.strptime(parsed_date, "%Y-%m-%d").date()
-            if date_obj.weekday() == 6:
-                reply     = "Sorry! Clinic is closed on Sundays. Please choose Monday to Saturday."
+            # ── Availability check — driven by weekly schedule config ──
+            av = get_availability_for_date(doctor_id, parsed_date)
+            if av["is_holiday"]:
+                name_part = f" ({av['holiday_name']})" if av.get("holiday_name") else ""
+                next_open = get_next_open_date(doctor_id, parsed_date)
+                next_part = f"\n\nThe next available date is {next_open}. Would you like to book for {next_open}?" if next_open else ""
+                reply     = f"The clinic is closed on {booking_date}{name_part}.{next_part}"
+                new_state = "idle"
+            elif not av["morning"]["enabled"] and not av["evening"]["enabled"]:
+                next_open = get_next_open_date(doctor_id, parsed_date)
+                next_part = f"\n\nThe next available date is {next_open}." if next_open else ""
+                reply     = f"Sorry! The clinic has no available sessions on {booking_date}.{next_part}\nPlease choose another date."
                 new_state = "idle"
             else:
-                # ── Availability check (replaces legacy check_holiday) ──
-                av = get_availability_for_date(doctor_id, parsed_date)
-                if av["is_holiday"]:
-                    name_part = f" ({av['holiday_name']})" if av.get("holiday_name") else ""
-                    next_open = get_next_open_date(doctor_id, parsed_date)
-                    next_part = f"\n\nThe next available date is {next_open}. Would you like to book for {next_open}?" if next_open else ""
-                    reply     = f"The clinic is closed on {booking_date}{name_part}.{next_part}"
-                    new_state = "idle"
-                elif not av["morning"]["enabled"] and not av["evening"]["enabled"]:
-                    next_open = get_next_open_date(doctor_id, parsed_date)
-                    next_part = f"\n\nThe next available date is {next_open}." if next_open else ""
-                    reply     = f"Sorry! The clinic has no available sessions on {booking_date}.{next_part}\nPlease choose another date."
+                # Generate slots respecting availability
+                import pytz as _pytz
+                _now = datetime.now(_pytz.timezone("Asia/Kolkata"))
+                cutoff = _now.strftime("%H:%M") if parsed_date == _now.date().isoformat() else ""
+
+                booked = get_booked_slots(doctor_id, parsed_date)
+                av_slots = generate_slots_for_date(doctor_id, parsed_date)
+                available = [
+                    s["time"] for s in av_slots
+                    if s["time"] not in booked and (not cutoff or s["time"] > cutoff)
+                ][:6]
+
+                if not available:
+                    reply     = f"Sorry! No slots available on {booking_date}. Please try another date."
                     new_state = "idle"
                 else:
-                    # Generate slots respecting availability
-                    import pytz as _pytz
-                    _now = datetime.now(_pytz.timezone("Asia/Kolkata"))
-                    cutoff = _now.strftime("%H:%M") if parsed_date == _now.date().isoformat() else ""
-
-                    booked = get_booked_slots(doctor_id, parsed_date)
-                    av_slots = generate_slots_for_date(doctor_id, parsed_date)
-                    available = [
-                        s["time"] for s in av_slots
-                        if s["time"] not in booked and (not cutoff or s["time"] > cutoff)
-                    ][:6]
-
-                    if not available:
-                        reply     = f"Sorry! No slots available on {booking_date}. Please try another date."
-                        new_state = "idle"
-                    else:
-                        # Session context for partial-block message
-                        morning_note = "" if av["morning"]["enabled"] else f"\n⚠️ Morning session unavailable. Evening slots from {fmt12(av['evening']['start'])}."
-                        evening_note = "" if av["evening"]["enabled"] else f"\n⚠️ Evening session unavailable. Morning slots until {fmt12(av['morning']['end'])}."
-                        slot_list = f"Available slots on {booking_date}:{morning_note}{evening_note}\n\n"
-                        for i, slot in enumerate(available, 1):
-                            slot_list += f"{i}. {format_time(slot)}\n"
-                        slot_list += "\nReply with slot number to confirm." + MENU_HINT
-                        reply     = slot_list
-                        new_state = "awaiting_slot"
-                        new_temp  = {
-                            "booking_date":    booking_date,
-                            "parsed_date":     parsed_date,
-                            "available_slots": available,
-                            "booking_for":     booking_for,
-                            "booking_name":    booking_name,
-                        }
+                    # Session context for partial-block message
+                    morning_note = "" if av["morning"]["enabled"] else f"\n⚠️ Morning session unavailable. Evening slots from {fmt12(av['evening']['start'])}."
+                    evening_note = "" if av["evening"]["enabled"] else f"\n⚠️ Evening session unavailable. Morning slots until {fmt12(av['morning']['end'])}."
+                    slot_list = f"Available slots on {booking_date}:{morning_note}{evening_note}\n\n"
+                    for i, slot in enumerate(available, 1):
+                        slot_list += f"{i}. {format_time(slot)}\n"
+                    slot_list += "\nReply with slot number to confirm." + MENU_HINT
+                    reply     = slot_list
+                    new_state = "awaiting_slot"
+                    new_temp  = {
+                        "booking_date":    booking_date,
+                        "parsed_date":     parsed_date,
+                        "available_slots": available,
+                        "booking_for":     booking_for,
+                        "booking_name":    booking_name,
+                    }
 
     # ── SLOT SELECTED ─────────────────────────────────────────
     elif intent == "slot_selected":
