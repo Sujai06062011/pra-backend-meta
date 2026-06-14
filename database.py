@@ -241,11 +241,12 @@ def assign_token_for_slot(doctor_id: str, appointment_date: str, appointment_tim
     if cancelled.data and cancelled.data[0].get("token_number"):
         return cancelled.data[0]["token_number"]
 
+    # Include cancelled rows so new tokens never collide with existing token numbers
     existing = supabase.table("appointments").select("token_number").eq(
         "doctor_id", doctor_id
-    ).eq("appointment_date", appointment_date).neq(
-        "status", "Cancelled"
-    ).order("token_number", desc=True).limit(1).execute()
+    ).eq("appointment_date", appointment_date).order(
+        "token_number", desc=True
+    ).limit(1).execute()
     if existing.data:
         return (existing.data[0].get("token_number") or 0) + 1
     return 1
