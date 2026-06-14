@@ -1059,6 +1059,97 @@ async def update_appointment_status(appointment_id: str, request: Request):
     return result.data[0] if result.data else {}
 
 
+@app.post("/appointments/bulk-cancel")
+async def bulk_cancel_appointments(request: Request):
+    from database import supabase
+    body = await request.json()
+    appointment_ids: list = body.get("appointment_ids", [])
+    reason: str = body.get("reason", "doctor_unavailable")
+    notify_whatsapp: bool = body.get("notify_whatsapp", True)
+
+    cancelled = []
+    failed = []
+    whatsapp_sent = 0
+    whatsapp_failed = 0
+
+    for appt_id in appointment_ids:
+        try:
+            row = supabase.table("appointments").update({
+                "status": "Cancelled",
+                "cancellation_reason": reason,
+            }).eq("id", appt_id).select("*, patients(*)").execute()
+            if not row.data:
+                failed.append(appt_id)
+                continue
+            cancelled.append(appt_id)
+            appt = row.data[0]
+
+            if notify_whatsapp:
+                patient = appt.get("patients") or {}
+                mobile = patient.get("mobile", "")
+                patient_name = patient.get("name", "Patient")
+                appt_date = appt.get("appointment_date", "")
+                appt_time = appt.get("appointment_time", "")
+
+                # Format date and time for message
+                try:
+                    from datetime import datetime
+                    date_obj = datetime.strptime(appt_date, "%Y-%m-%d")
+                    date_str = date_obj.strftime("%d %b %Y")
+                except Exception:
+                    date_str = appt_date
+
+                if appt_time:
+                    try:
+                        h = int(appt_time[:2])
+                        m = appt_time[3:5]
+                        h12 = h % 12 or 12
+                        ampm = "PM" if h >= 12 else "AM"
+                        time_str = f"{h12}:{m} {ampm}"
+                    except Exception:
+                        time_str = appt_time
+                else:
+                    time_str = ""
+
+                clinic_name = "the clinic"
+                try:
+                    doc_row = supabase.table("doctors").select("clinic_name").eq("id", appt.get("doctor_id", "")).execute()
+                    if doc_row.data:
+                        clinic_name = doc_row.data[0].get("clinic_name") or clinic_name
+                except Exception:
+                    pass
+
+                msg = (
+                    f"Hi {patient_name} 👋\n\n"
+                    f"Your appointment at {clinic_name} on {date_str}"
+                    + (f" at {time_str}" if time_str else "")
+                    + f" has been cancelled.\n\n"
+                    f"We apologise for the inconvenience. Please reply to reschedule.\n\n"
+                    f"— {clinic_name} Team"
+                )
+
+                if mobile:
+                    try:
+                        await send_meta_text(mobile, msg)
+                        whatsapp_sent += 1
+                    except Exception as e:
+                        print(f"[bulk-cancel] WhatsApp failed for {appt_id}: {e}")
+                        whatsapp_failed += 1
+                else:
+                    whatsapp_failed += 1
+
+        except Exception as e:
+            print(f"[bulk-cancel] Failed to cancel {appt_id}: {e}")
+            failed.append(appt_id)
+
+    return {
+        "cancelled": cancelled,
+        "failed": failed,
+        "whatsapp_sent": whatsapp_sent,
+        "whatsapp_failed": whatsapp_failed,
+    }
+
+
 # ── QUEUE ─────────────────────────────────────────────────
 @app.get("/queue/status")
 async def queue_status(doctor_id: str, date: str = ""):
