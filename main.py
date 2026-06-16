@@ -3092,6 +3092,65 @@ async def book_appointment(request: Request):
         except Exception as e:
             print(f"❌ WhatsApp booking confirmation failed: {e}")
 
+    # ── Online consultation: auto-create video room if slot qualifies ──────────
+    try:
+        is_online = await is_online_consultation_slot(
+            doctor_id=doctor_id,
+            appointment_date=appt_date,
+            appointment_time=appt_time,
+        )
+        if is_online:
+            consultation = await create_consultation_for_appointment(
+                appointment_id=appt_id,
+                patient_id=patient_id,
+                doctor_id=doctor_id,
+                appointment_date=appt_date,
+                appointment_time=appt_time,
+                chief_complaint="",
+            )
+            if consultation and pat_mob:
+                try:
+                    time_obj = datetime.strptime(appt_time[:5], "%H:%M")
+                    formatted_time = time_obj.strftime("%I:%M %p")
+                except Exception:
+                    formatted_time = appt_time[:5]
+
+                room_url = consultation["room_url"]
+
+                if language == "tamil":
+                    video_message = (
+                        f"🎥 இது ஆன்லைன் கன்சல்டேஷன்!\n\n"
+                        f"⏰ {formatted_time}-ல் கீழே உள்ள லிங்கை கிளிக் செய்து join ஆகுங்கள்:\n\n"
+                        f"{room_url}\n\n"
+                        f"✅ Download தேவையில்லை\n"
+                        f"✅ Login தேவையில்லை\n"
+                        f"லிங்கை கிளிக் செய்தால் போதும்!"
+                    )
+                elif language == "hindi":
+                    video_message = (
+                        f"🎥 यह ऑनलाइन कंसल्टेशन है!\n\n"
+                        f"⏰ {formatted_time} पर नीचे दिए लिंक पर क्लिक करें:\n\n"
+                        f"{room_url}\n\n"
+                        f"✅ कोई डाउनलोड नहीं\n"
+                        f"✅ कोई लॉगिन नहीं\n"
+                        f"बस लिंक पर क्लिक करें!"
+                    )
+                else:
+                    video_message = (
+                        f"🎥 This is an Online Consultation!\n\n"
+                        f"⏰ At {formatted_time}, click the link below to join:\n\n"
+                        f"{room_url}\n\n"
+                        f"✅ No download needed\n"
+                        f"✅ No login required\n"
+                        f"Just click the link at appointment time!"
+                    )
+
+                await send_meta_text(pat_mob, video_message)
+                print(f"[Online Consultation] Video link sent to {pat_mob}")
+    except Exception as e:
+        print(f"[Online consultation auto-create error] {e}")
+    # ── End online consultation block ────────────────────────────────────────
+
     return {
         "appointment_id": appt_id,
         "token_number":   token,
@@ -3116,6 +3175,83 @@ async def test_meta_interactive(request: Request):
         footer="Dr. Kumar Child Care Clinic"
     )
     return result
+
+
+# ── Online consultation slot helpers ─────────────────────────────────────────
+
+async def is_online_consultation_slot(
+    doctor_id: str,
+    appointment_date: str,   # "2026-06-16"
+    appointment_time: str,   # "22:00:00"
+) -> bool:
+    try:
+        doctor = supabase.table("doctors") \
+            .select("online_consultation_enabled, online_consultation_hours") \
+            .eq("id", doctor_id).single().execute()
+        if not doctor.data:
+            return False
+        if not doctor.data.get("online_consultation_enabled"):
+            return False
+        hours = doctor.data.get("online_consultation_hours") or []
+        if not hours:
+            return False
+        from datetime import date as date_type
+        appt_date_obj = date_type.fromisoformat(appointment_date)
+        day_name  = appt_date_obj.strftime("%A").lower()
+        appt_time = appointment_time[:5]
+        for slot in hours:
+            if slot.get("day", "").lower() == day_name:
+                slot_start = slot.get("start", "")[:5]
+                slot_end   = slot.get("end",   "")[:5]
+                if slot_start <= appt_time <= slot_end:
+                    return True
+        return False
+    except Exception as e:
+        print(f"[Online slot check error] {e}")
+        return False
+
+
+async def create_consultation_for_appointment(
+    appointment_id: str,
+    patient_id: str,
+    doctor_id: str,
+    appointment_date: str,
+    appointment_time: str,
+    chief_complaint: str = "",
+) -> dict | None:
+    try:
+        doctor = supabase.table("doctors").select("name, clinic_name") \
+            .eq("id", doctor_id).single().execute()
+        scheduled_str = f"{appointment_date}T{appointment_time}"
+        try:
+            scheduled_at = IST.localize(datetime.strptime(scheduled_str, "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            scheduled_at = IST.localize(datetime.strptime(scheduled_str, "%Y-%m-%dT%H:%M"))
+        room_id  = generate_room_id(doctor.data["name"], scheduled_at)
+        room_url = get_patient_join_url(room_id)
+        row = supabase.table("consultations").insert({
+            "appointment_id":    appointment_id,
+            "patient_id":        patient_id,
+            "doctor_id":         doctor_id,
+            "room_id":           room_id,
+            "room_url":          room_url,
+            "scheduled_at":      scheduled_at.isoformat(),
+            "status":            "scheduled",
+            "consultation_type": "online",
+            "chief_complaint":   chief_complaint,
+            "patient_link_sent": False,
+        }).execute()
+        supabase.table("appointments").update({"consultation_type": "online"}) \
+            .eq("id", appointment_id).execute()
+        print(f"[Online Consultation] Created room {room_id} for appointment {appointment_id}")
+        return {
+            "consultation_id": row.data[0]["id"],
+            "room_id":  room_id,
+            "room_url": room_url,
+        }
+    except Exception as e:
+        print(f"[Create consultation error] {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
