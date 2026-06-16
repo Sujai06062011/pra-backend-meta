@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
@@ -353,20 +353,88 @@ async def trigger_review_requests():
 @app.get("/medicines/categories")
 async def get_medicine_categories(doctor_id: str):
     from database import supabase as db
-    result = db.table("clinic_medicines").select("category").eq("is_active", True).execute()
+    result = db.table("clinic_medicines").select("category").eq("doctor_id", doctor_id).eq("is_active", True).execute()
     categories = sorted(set(r["category"] for r in (result.data or []) if r.get("category")))
     return categories
 
+def _compute_stock_status(medicine: dict, stock_batches: list) -> dict:
+    """Compute stock summary fields for a medicine given its active stock batches."""
+    today = date.today()
+    ninety_days = today + timedelta(days=90)
+
+    total_stock = sum(b.get("tablets_remaining", 0) or 0 for b in stock_batches)
+    threshold = medicine.get("low_stock_threshold")
+    has_expired = any(b.get("expiry_date") and b["expiry_date"] < today.isoformat() for b in stock_batches if b.get("tablets_remaining", 0) > 0)
+    has_expiring = any(
+        b.get("expiry_date") and today.isoformat() < b["expiry_date"] <= ninety_days.isoformat()
+        for b in stock_batches if b.get("tablets_remaining", 0) > 0
+    )
+
+    expiry_dates = [b["expiry_date"] for b in stock_batches if b.get("expiry_date") and b.get("tablets_remaining", 0) > 0]
+    earliest_expiry = min(expiry_dates) if expiry_dates else None
+
+    # Only compute status if stock has ever been entered
+    if not stock_batches and total_stock == 0:
+        stock_status = None
+    elif has_expired:
+        stock_status = "expired"
+    elif total_stock == 0:
+        stock_status = "out_of_stock"
+    elif threshold is not None and total_stock <= threshold:
+        stock_status = "low_stock"
+    elif has_expiring:
+        stock_status = "expiring_soon"
+    else:
+        stock_status = "ok"
+
+    return {
+        "total_stock": total_stock if stock_batches else None,
+        "stock_status": stock_status,
+        "earliest_expiry": earliest_expiry,
+    }
+
 @app.get("/medicines")
-async def search_medicines(doctor_id: str, search: str = "", limit: int = 10):
+async def search_medicines(doctor_id: str, search: str = "", limit: int = 10, active: str = ""):
     from database import supabase as db
-    # Fetch all active medicines, filter by name in Python (ilike not reliable across versions)
-    result = db.table("clinic_medicines").select("*").eq("is_active", True).order("usage_count", desc=True).limit(200).execute()
+    q = db.table("clinic_medicines").select("*").eq("doctor_id", doctor_id)
+    if active == "true":
+        q = q.eq("is_active", True)
+    elif active == "false":
+        q = q.eq("is_active", False)
+    else:
+        # Default: return all (for Medicines page). Prescription search passes active=true
+        pass
+    result = q.order("usage_count", desc=True).limit(500).execute()
     data = result.data or []
+
+    # For prescription search (no active param or active=true), filter active
+    # Note: if caller passes active=true explicitly, already filtered above
+    # For search (prescription writer), we should only show active
     if search:
         q_lower = search.lower()
         data = [m for m in data if q_lower in (m.get("name") or "").lower()]
-    return data[:limit]
+        # Prescription search: only return truly active (is_active != false)
+        data = [m for m in data if m.get("is_active") is not False]
+
+    if limit and len(data) > limit:
+        data = data[:limit]
+
+    # Fetch stock for all medicines in one query
+    if data:
+        med_ids = [m["id"] for m in data]
+        stock_res = db.table("medicine_stock").select("medicine_id, tablets_remaining, expiry_date, is_active").in_("medicine_id", med_ids).eq("is_active", True).execute()
+        stock_map: dict = {}
+        for s in (stock_res.data or []):
+            stock_map.setdefault(s["medicine_id"], []).append(s)
+
+        for m in data:
+            batches = stock_map.get(m["id"], [])
+            stock_info = _compute_stock_status(m, batches)
+            m["total_stock"] = stock_info["total_stock"]
+            m["stock_status"] = stock_info["stock_status"]
+            m["earliest_expiry"] = stock_info["earliest_expiry"]
+
+    return data
 
 @app.post("/medicines")
 async def add_medicine(request: Request):
@@ -380,6 +448,10 @@ async def add_medicine(request: Request):
         "dosages": body.get("dosages", []),
         "form": body.get("form", "tablet"),
         "is_active": True,
+        "purchase_unit": body.get("purchase_unit", "strip"),
+        "dispense_unit": body.get("dispense_unit", "tablet"),
+        "tablets_per_strip": body.get("tablets_per_strip", 10),
+        "low_stock_threshold": body.get("low_stock_threshold") or None,
     }).execute()
     return result.data[0] if result.data else {}
 
@@ -388,14 +460,10 @@ async def update_medicine(medicine_id: str, request: Request):
     from database import supabase as db
     import datetime as dt
     body = await request.json()
-    update_data = {k: v for k, v in {
-        "name": body.get("name"),
-        "category": body.get("category"),
-        "dosages": body.get("dosages"),
-        "form": body.get("form"),
-        "is_active": body.get("is_active"),
-        "updated_at": dt.datetime.utcnow().isoformat(),
-    }.items() if v is not None}
+    allowed = ["name", "category", "dosages", "form", "is_active",
+               "purchase_unit", "dispense_unit", "tablets_per_strip", "low_stock_threshold"]
+    update_data = {k: body[k] for k in allowed if k in body}
+    update_data["updated_at"] = dt.datetime.utcnow().isoformat()
     result = db.table("clinic_medicines").update(update_data).eq("id", medicine_id).execute()
     return result.data[0] if result.data else {}
 
@@ -410,6 +478,225 @@ async def deactivate_medicine(medicine_id: str):
     from database import supabase as db
     db.table("clinic_medicines").update({"is_active": False}).eq("id", medicine_id).execute()
     return {"ok": True}
+
+@app.patch("/medicines/{medicine_id}/deactivate")
+async def deactivate_medicine_v2(medicine_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+    db.table("clinic_medicines").update({
+        "is_active": False,
+        "deactivated_at": datetime.now(IST).isoformat(),
+        "deactivation_reason": body.get("reason") or None,
+    }).eq("id", medicine_id).execute()
+    return {"ok": True}
+
+@app.patch("/medicines/{medicine_id}/activate")
+async def activate_medicine(medicine_id: str):
+    from database import supabase as db
+    db.table("clinic_medicines").update({
+        "is_active": True,
+        "deactivated_at": None,
+        "deactivation_reason": None,
+    }).eq("id", medicine_id).execute()
+    return {"ok": True}
+
+@app.patch("/medicines/{medicine_id}/threshold")
+async def set_medicine_threshold(medicine_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+    db.table("clinic_medicines").update({
+        "low_stock_threshold": body.get("threshold"),
+    }).eq("id", medicine_id).execute()
+    return {"ok": True}
+
+@app.get("/medicines/{medicine_id}/stock")
+async def get_medicine_stock(medicine_id: str):
+    from database import supabase as db
+    med_res = db.table("clinic_medicines").select("tablets_per_strip").eq("id", medicine_id).execute()
+    tablets_per_strip = (med_res.data[0].get("tablets_per_strip") or 10) if med_res.data else 10
+
+    result = db.table("medicine_stock").select("*").eq("medicine_id", medicine_id).eq("is_active", True).order("expiry_date", desc=False).execute()
+    today = date.today().isoformat()
+    ninety_days = (date.today() + timedelta(days=90)).isoformat()
+    batches = []
+    for b in (result.data or []):
+        expiry = b.get("expiry_date", "")
+        if expiry < today:
+            expiry_status = "expired"
+        elif expiry <= ninety_days:
+            expiry_status = "expiring_soon"
+        else:
+            expiry_status = "ok"
+        remaining = b.get("tablets_remaining", 0) or 0
+        strips_remaining = round(remaining / tablets_per_strip, 2) if tablets_per_strip else remaining
+        batches.append({**b, "expiry_status": expiry_status, "strips_remaining": strips_remaining})
+    return batches
+
+@app.post("/medicines/{medicine_id}/stock")
+async def add_medicine_stock(medicine_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+
+    med_res = db.table("clinic_medicines").select("tablets_per_strip, doctor_id").eq("id", medicine_id).execute()
+    if not med_res.data:
+        raise HTTPException(404, "Medicine not found")
+    med = med_res.data[0]
+    tablets_per_strip = med.get("tablets_per_strip") or 10
+    doctor_id = med.get("doctor_id")
+
+    strips_received = int(body.get("strips_received", 0))
+    tablets_received = strips_received * tablets_per_strip
+    batch_number = body.get("batch_number", "")
+    supplier_name = body.get("supplier_name", "")
+
+    batch_res = db.table("medicine_stock").insert({
+        "medicine_id": medicine_id,
+        "doctor_id": doctor_id,
+        "batch_number": batch_number,
+        "expiry_date": body.get("expiry_date"),
+        "strips_received": strips_received,
+        "tablets_received": tablets_received,
+        "tablets_remaining": tablets_received,
+        "purchase_price_per_strip": body.get("purchase_price_per_strip"),
+        "supplier_name": supplier_name,
+        "invoice_number": body.get("invoice_number"),
+        "date_received": body.get("date_received") or date.today().isoformat(),
+        "is_active": True,
+        "created_at": datetime.now(IST).isoformat(),
+        "updated_at": datetime.now(IST).isoformat(),
+    }).execute()
+    batch = batch_res.data[0] if batch_res.data else {}
+    batch_id = batch.get("id")
+
+    db.table("stock_transactions").insert({
+        "medicine_id": medicine_id,
+        "stock_batch_id": batch_id,
+        "doctor_id": doctor_id,
+        "transaction_type": "purchase",
+        "quantity_change": tablets_received,
+        "notes": f"Batch {batch_number} received from {supplier_name}",
+        "created_at": datetime.now(IST).isoformat(),
+    }).execute()
+
+    return {"ok": True, "batch": batch, "tablets_received": tablets_received}
+
+@app.post("/medicines/{medicine_id}/stock/{batch_id}/writeoff")
+async def writeoff_stock(medicine_id: str, batch_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+    reason = body.get("reason", "expired")
+    quantity = int(body.get("quantity", 0))
+
+    batch_res = db.table("medicine_stock").select("*").eq("id", batch_id).eq("medicine_id", medicine_id).execute()
+    if not batch_res.data:
+        raise HTTPException(404, "Batch not found")
+    batch = batch_res.data[0]
+    available = batch.get("tablets_remaining", 0) or 0
+    deduct = min(quantity, available)
+    new_remaining = available - deduct
+
+    db.table("medicine_stock").update({
+        "tablets_remaining": new_remaining,
+        "is_active": new_remaining > 0,
+        "updated_at": datetime.now(IST).isoformat(),
+    }).eq("id", batch_id).execute()
+
+    db.table("stock_transactions").insert({
+        "medicine_id": medicine_id,
+        "stock_batch_id": batch_id,
+        "doctor_id": batch.get("doctor_id"),
+        "transaction_type": "expired_writeoff",
+        "quantity_change": -deduct,
+        "notes": f"Write-off: {reason}",
+        "created_at": datetime.now(IST).isoformat(),
+    }).execute()
+
+    return {"ok": True, "deducted": deduct, "remaining": new_remaining}
+
+@app.get("/medicines/{medicine_id}/transactions")
+async def get_medicine_transactions(medicine_id: str):
+    from database import supabase as db
+    result = db.table("stock_transactions").select("*, medicine_stock(batch_number, expiry_date)").eq("medicine_id", medicine_id).order("created_at", desc=True).limit(50).execute()
+    return result.data or []
+
+@app.get("/dashboard/pharmacy-alerts")
+async def get_pharmacy_alerts(doctor_id: str):
+    from database import supabase as db
+    today = date.today().isoformat()
+    ninety_days = (date.today() + timedelta(days=90)).isoformat()
+
+    # 1. All active medicines with their stock totals
+    meds_res = db.table("clinic_medicines").select("id, name, dispense_unit, low_stock_threshold").eq("doctor_id", doctor_id).eq("is_active", True).execute()
+    meds = {m["id"]: m for m in (meds_res.data or [])}
+
+    low_stock = []
+    if meds:
+        stock_res = db.table("medicine_stock").select("medicine_id, tablets_remaining").in_("medicine_id", list(meds.keys())).eq("is_active", True).gte("expiry_date", today).execute()
+        totals: dict = {}
+        for s in (stock_res.data or []):
+            totals[s["medicine_id"]] = totals.get(s["medicine_id"], 0) + (s["tablets_remaining"] or 0)
+
+        for mid, med in meds.items():
+            threshold = med.get("low_stock_threshold")
+            if threshold is None:
+                continue
+            total = totals.get(mid, 0)
+            if total <= threshold:
+                low_stock.append({
+                    "id": mid,
+                    "name": med["name"],
+                    "dispense_unit": med.get("dispense_unit", "tablet"),
+                    "low_stock_threshold": threshold,
+                    "total_stock": total,
+                })
+
+    # 2. Expiring soon
+    exp_res = db.table("medicine_stock").select("id, medicine_id, expiry_date, batch_number, tablets_remaining, clinic_medicines(name, is_active)").eq("is_active", True).gt("expiry_date", today).lte("expiry_date", ninety_days).gt("tablets_remaining", 0).order("expiry_date", desc=False).execute()
+    expiring_soon = []
+    for s in (exp_res.data or []):
+        med_info = s.get("clinic_medicines") or {}
+        if med_info.get("is_active") is False:
+            continue
+        med_id = s["medicine_id"]
+        if med_id not in meds and med_info.get("is_active") is not False:
+            pass
+        expiring_soon.append({
+            "id": med_id,
+            "batch_id": s["id"],
+            "name": med_info.get("name", ""),
+            "expiry_date": s["expiry_date"],
+            "batch_number": s["batch_number"],
+            "tablets_remaining": s["tablets_remaining"],
+        })
+
+    # 3. Expired with stock remaining
+    expired_res = db.table("medicine_stock").select("id, medicine_id, expiry_date, batch_number, tablets_remaining, clinic_medicines(name, is_active)").eq("is_active", True).lt("expiry_date", today).gt("tablets_remaining", 0).execute()
+    expired = []
+    for s in (expired_res.data or []):
+        med_info = s.get("clinic_medicines") or {}
+        if med_info.get("is_active") is False:
+            continue
+        expired.append({
+            "id": s["medicine_id"],
+            "batch_id": s["id"],
+            "name": med_info.get("name", ""),
+            "expiry_date": s["expiry_date"],
+            "batch_number": s["batch_number"],
+            "tablets_remaining": s["tablets_remaining"],
+        })
+
+    total_alerts = len(low_stock) + len(expiring_soon) + len(expired)
+    return {
+        "low_stock": low_stock,
+        "expiring_soon": expiring_soon,
+        "expired": expired,
+        "summary": {
+            "low_stock_count": len(low_stock),
+            "expiring_soon_count": len(expiring_soon),
+            "expired_count": len(expired),
+            "total_alerts": total_alerts,
+        },
+    }
 
 
 # ── PRESCRIPTIONS WRITE ───────────────────────────────────
@@ -1578,8 +1865,67 @@ async def list_prescriptions(doctor_id: str, patient_id: str = ""):
     return [_decode_walkin(r) for r in (result.data or [])]
 
 
+async def deduct_stock_for_prescription(prescription_id: str, doctor_id: str, medicines: list):
+    """FIFO stock deduction — runs as background task after prescription save."""
+    from database import supabase as db
+    try:
+        for med in medicines:
+            med_name = med.get("medicine_name", "").strip()
+            if not med_name:
+                continue
+            med_res = db.table("clinic_medicines").select("id, name, tablets_per_strip, low_stock_threshold").eq("doctor_id", doctor_id).ilike("name", f"%{med_name}%").limit(1).execute()
+            if not med_res.data:
+                continue
+            medicine = med_res.data[0]
+            medicine_id = medicine["id"]
+
+            doses_per_day = sum([
+                1 if med.get("morning") else 0,
+                1 if med.get("afternoon") else 0,
+                1 if med.get("evening") else 0,
+                1 if med.get("night") else 0,
+            ])
+            tablets_needed = doses_per_day * int(med.get("duration_days") or 1)
+            if tablets_needed <= 0:
+                continue
+
+            batches_res = db.table("medicine_stock").select("id, tablets_remaining, expiry_date, batch_number").eq("medicine_id", medicine_id).eq("is_active", True).gte("expiry_date", date.today().isoformat()).order("expiry_date", desc=False).execute()
+
+            remaining_to_deduct = tablets_needed
+            for batch in (batches_res.data or []):
+                if remaining_to_deduct <= 0:
+                    break
+                available = batch["tablets_remaining"] or 0
+                deduct_from_batch = min(available, remaining_to_deduct)
+                new_remaining = available - deduct_from_batch
+                db.table("medicine_stock").update({
+                    "tablets_remaining": new_remaining,
+                    "is_active": new_remaining > 0,
+                    "updated_at": datetime.now(IST).isoformat(),
+                }).eq("id", batch["id"]).execute()
+                db.table("stock_transactions").insert({
+                    "medicine_id": medicine_id,
+                    "stock_batch_id": batch["id"],
+                    "doctor_id": doctor_id,
+                    "transaction_type": "dispensed",
+                    "quantity_change": -deduct_from_batch,
+                    "reference_id": prescription_id,
+                    "notes": "Dispensed for prescription",
+                    "created_at": datetime.now(IST).isoformat(),
+                }).execute()
+                remaining_to_deduct -= deduct_from_batch
+
+            threshold = medicine.get("low_stock_threshold")
+            if threshold is not None:
+                final_res = db.table("medicine_stock").select("tablets_remaining").eq("medicine_id", medicine_id).eq("is_active", True).gte("expiry_date", date.today().isoformat()).execute()
+                total_remaining = sum((r["tablets_remaining"] or 0) for r in (final_res.data or []))
+                if total_remaining <= threshold:
+                    print(f"[LOW STOCK ALERT] {medicine['name']}: {total_remaining} remaining (threshold: {threshold})")
+    except Exception as e:
+        print(f"[STOCK DEDUCTION ERROR] prescription {prescription_id}: {e}")
+
 @app.post("/prescriptions")
-async def create_prescription_v2(request: Request):
+async def create_prescription_v2(request: Request, background_tasks: BackgroundTasks):
     from database import supabase as db
     import datetime as dt
     import pytz
@@ -1688,6 +2034,15 @@ async def create_prescription_v2(request: Request):
             }).execute()
         except Exception:
             pass
+
+    # Background stock deduction — non-blocking
+    if pres_id and medicines_input:
+        background_tasks.add_task(
+            deduct_stock_for_prescription,
+            prescription_id=pres_id,
+            doctor_id=doctor_id_req,
+            medicines=medicines_input,
+        )
 
     return {"prescription_id": pres_id}
 
