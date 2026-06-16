@@ -540,21 +540,32 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
                 booked = get_booked_slots(doctor_id, parsed_date)
                 av_slots = generate_slots_for_date(doctor_id, parsed_date)
-                available = [
-                    s["time"] for s in av_slots
+                available_full = [
+                    s for s in av_slots
                     if s["time"] not in booked and (not cutoff or s["time"] > cutoff)
-                ][:6]
+                ]
+                available = [s["time"] for s in available_full]
 
                 if not available:
                     reply     = f"Sorry! No slots available on {booking_date}. Please try another date."
                     new_state = "idle"
                 else:
-                    # Session context for partial-block message
-                    morning_note = "" if av["morning"]["enabled"] else f"\n⚠️ Morning session unavailable. Evening slots from {fmt12(av['evening']['start'])}."
-                    evening_note = "" if av["evening"]["enabled"] else f"\n⚠️ Evening session unavailable. Morning slots until {fmt12(av['morning']['end'])}."
-                    slot_list = f"Available slots on {booking_date}:{morning_note}{evening_note}\n\n"
-                    for i, slot in enumerate(available, 1):
-                        slot_list += f"{i}. {format_time(slot)}\n"
+                    # Group by session for readability
+                    morning_slots = [s for s in available_full if s["session"] == "morning"]
+                    evening_slots = [s for s in available_full if s["session"] == "evening"]
+
+                    slot_list = f"Available slots on {booking_date}:\n"
+                    idx = 1
+                    if morning_slots:
+                        slot_list += "\n🌅 Morning\n"
+                        for s in morning_slots:
+                            slot_list += f"{idx}. {format_time(s['time'])}\n"
+                            idx += 1
+                    if evening_slots:
+                        slot_list += "\n🌆 Evening\n"
+                        for s in evening_slots:
+                            slot_list += f"{idx}. {format_time(s['time'])}\n"
+                            idx += 1
                     slot_list += "\nReply with slot number to confirm." + MENU_HINT
                     reply     = slot_list
                     new_state = "awaiting_slot"
