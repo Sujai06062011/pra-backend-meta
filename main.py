@@ -3377,7 +3377,7 @@ async def jaas_key_debug():
 async def test_create_consultation():
     """Quick smoke-test: creates a consultation 30 mins from now for the test patient."""
     from starlette.requests import Request as StarletteRequest
-    scheduled = datetime.now(IST) + timedelta(minutes=30)
+    scheduled = datetime.now(IST) + timedelta(minutes=1)
 
     class _FakeRequest:
         async def json(self):
