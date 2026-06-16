@@ -2371,6 +2371,49 @@ async def return_dispense_item(order_id: str, request: Request):
     return {"ok": True, "order_status": order_status, "new_stock": new_remaining}
 
 
+@app.post("/dispense-orders/{order_id}/reopen-item")
+async def reopen_dispense_item(order_id: str, request: Request):
+    """
+    Reopen a completed dispense item so remaining qty can be dispensed later.
+    Body: { item_id }
+    - Resets item status to pending
+    - Order moves back to partial so it appears in the Pending/Partial tab
+    """
+    from database import supabase as db
+    import datetime as dt, pytz
+    body    = await request.json()
+    item_id = body.get("item_id")
+
+    order_res = db.table("dispense_orders").select("id, status").eq("id", order_id).limit(1).execute()
+    if not order_res.data:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    item_res = db.table("dispense_items").select("id, status, qty_prescribed, qty_dispensed").eq("id", item_id).limit(1).execute()
+    if not item_res.data:
+        raise HTTPException(status_code=404, detail="Dispense item not found")
+
+    item = item_res.data[0]
+    remaining = float(item["qty_prescribed"]) - float(item.get("qty_dispensed") or 0)
+    if remaining <= 0:
+        raise HTTPException(status_code=400, detail="No remaining qty to dispense")
+
+    db.table("dispense_items").update({
+        "status":       "pending",
+        "dispensed_at": None,
+    }).eq("id", item_id).execute()
+
+    # Order must move back to partial (some items already done, this one pending)
+    IST     = pytz.timezone("Asia/Kolkata")
+    now_str = dt.datetime.now(IST).isoformat()
+    db.table("dispense_orders").update({
+        "status":     "partial",
+        "updated_at": now_str,
+    }).eq("id", order_id).execute()
+
+    print(f"[DISPENSE REOPEN] Item {item_id} reopened, remaining={remaining}")
+    return {"ok": True, "remaining": remaining}
+
+
 @app.post("/prescriptions")
 async def create_prescription_v2(request: Request, background_tasks: BackgroundTasks):
     from database import supabase as db
