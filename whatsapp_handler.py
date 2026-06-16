@@ -686,6 +686,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                                 mobile=from_number,
                                 room_url=_consult["room_url"],
                                 appointment_time=selected_slot,
+                                appointment_date=parsed_date,
                                 language=_pat_lang,
                             )
                             print(f"[ONLINE CONSULTATION] Video link sent to {from_number}")

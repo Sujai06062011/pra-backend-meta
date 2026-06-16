@@ -3110,6 +3110,7 @@ async def book_appointment(request: Request):
                     mobile=pat_mob,
                     room_url=consultation["room_url"],
                     appointment_time=appt_time,
+                    appointment_date=appt_date,
                     language=language,
                 )
                 print(f"[Online Consultation] Video link sent to {pat_mob}")

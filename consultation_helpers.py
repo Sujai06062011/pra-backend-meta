@@ -165,6 +165,7 @@ async def send_video_link_to_patient(
     mobile: str,
     room_url: str,
     appointment_time: str,   # "22:00" or "22:00:00"
+    appointment_date: str = "",  # "2026-06-17"
     language: str = "english",
 ):
     try:
@@ -173,12 +174,19 @@ async def send_video_link_to_patient(
     except Exception:
         formatted_time = appointment_time[:5]
 
+    try:
+        from datetime import date as _date
+        formatted_date = _date.fromisoformat(appointment_date).strftime("%d %b %Y")
+    except Exception:
+        formatted_date = appointment_date
+
     lang = (language or "english").lower()
 
     if lang == "tamil":
         msg = (
             f"🎥 இது ஆன்லைன் கன்சல்டேஷன்!\n\n"
-            f"⏰ {formatted_time}-ல் கீழே உள்ள லிங்கை கிளிக் செய்து join ஆகுங்கள்:\n\n"
+            f"📅 {formatted_date} | ⏰ {formatted_time}\n\n"
+            f"கீழே உள்ள லிங்கை கிளிக் செய்து join ஆகுங்கள்:\n\n"
             f"{room_url}\n\n"
             f"✅ Download தேவையில்லை\n"
             f"✅ Login தேவையில்லை\n"
@@ -187,7 +195,8 @@ async def send_video_link_to_patient(
     elif lang == "hindi":
         msg = (
             f"🎥 यह ऑनलाइन कंसल्टेशन है!\n\n"
-            f"⏰ {formatted_time} पर नीचे दिए लिंक पर क्लिक करें:\n\n"
+            f"📅 {formatted_date} | ⏰ {formatted_time}\n\n"
+            f"नीचे दिए लिंक पर क्लिक करें:\n\n"
             f"{room_url}\n\n"
             f"✅ कोई डाउनलोड नहीं\n"
             f"✅ कोई लॉगिन नहीं\n"
@@ -196,7 +205,8 @@ async def send_video_link_to_patient(
     else:
         msg = (
             f"🎥 This is an Online Consultation!\n\n"
-            f"⏰ At {formatted_time}, click the link below to join:\n\n"
+            f"📅 {formatted_date} | ⏰ {formatted_time}\n\n"
+            f"Click the link below to join:\n\n"
             f"{room_url}\n\n"
             f"✅ No download needed\n"
             f"✅ No login required\n"
