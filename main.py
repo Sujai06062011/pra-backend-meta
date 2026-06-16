@@ -3295,7 +3295,8 @@ async def list_consultations(
     if date:
         q = q.gte("scheduled_at", f"{date}T00:00:00+05:30").lte("scheduled_at", f"{date}T23:59:59+05:30")
     if status:
-        q = q.eq("status", status)
+        status_list = [s.strip() for s in status.split(",")]
+        q = q.in_("status", status_list)
 
     result = q.execute()
     return {"consultations": result.data or []}
