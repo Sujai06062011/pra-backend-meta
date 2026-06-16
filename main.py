@@ -35,6 +35,40 @@ JAAS_API_KEY_ID = os.getenv("JAAS_API_KEY_ID", "")
 JAAS_PRIVATE_KEY_STR = os.getenv("JAAS_PRIVATE_KEY", "")
 
 
+def _load_private_key(raw: str):
+    """Try multiple normalisation strategies for Railway-stored PEM keys."""
+    # Strategy 1: literal \n → real newline
+    pem = raw.replace("\\n", "\n").strip()
+    # Strategy 2: if still one long line, insert newlines at PEM header/footer/64-char chunks
+    if "\n" not in pem:
+        # Split on the PEM markers and reformat
+        import re
+        pem = re.sub(r"(-----BEGIN [^-]+-----)(.+?)(-----END [^-]+-----)",
+                     lambda m: m.group(1) + "\n" +
+                               "\n".join(m.group(2).strip().replace(" ", "").split()) + "\n" +
+                               m.group(3),
+                     pem, flags=re.DOTALL)
+        # chunk body into 64-char lines
+        lines = pem.splitlines()
+        out = []
+        for line in lines:
+            if line.startswith("-----"):
+                out.append(line)
+            else:
+                # re-chunk
+                body = "".join(out_line for out_line in line.split() if not out_line.startswith("-----"))
+                out.extend([body[i:i+64] for i in range(0, len(body), 64)])
+        pem = "\n".join(out)
+    for attempt in (pem, pem + "\n"):
+        try:
+            return serialization.load_pem_private_key(
+                attempt.encode(), password=None, backend=default_backend()
+            )
+        except Exception:
+            pass
+    raise ValueError(f"Cannot deserialize private key. Starts with: {repr(raw[:80])}")
+
+
 def generate_jaas_jwt(
     room_name: str,
     user_name: str,
@@ -42,10 +76,7 @@ def generate_jaas_jwt(
     is_moderator: bool = False,
 ) -> str:
     try:
-        private_key_pem = JAAS_PRIVATE_KEY_STR.replace("\\n", "\n")
-        private_key = serialization.load_pem_private_key(
-            private_key_pem.encode(), password=None, backend=default_backend()
-        )
+        private_key = _load_private_key(JAAS_PRIVATE_KEY_STR)
         now = int(time_module.time())
         payload = {
             "iss": "chat",
@@ -3341,6 +3372,27 @@ async def get_online_settings(doctor_id: str):
         "online_consultation_enabled": False,
         "online_consultation_hours":   [],
         "online_consultation_fee":     0,
+    }
+
+
+@app.get("/test/jaas-key-debug")
+async def jaas_key_debug():
+    """Show key metadata (NOT the key itself) for diagnosing Railway env var issues."""
+    raw = JAAS_PRIVATE_KEY_STR
+    has_literal_backslash_n = "\\n" in raw
+    has_real_newline = "\n" in raw
+    normalised = raw.replace("\\n", "\n").strip()
+    lines = normalised.splitlines()
+    return {
+        "app_id": JAAS_APP_ID,
+        "api_key_id": JAAS_API_KEY_ID,
+        "key_total_chars": len(raw),
+        "has_literal_backslash_n": has_literal_backslash_n,
+        "has_real_newline": has_real_newline,
+        "first_80_chars_repr": repr(raw[:80]),
+        "normalised_line_count": len(lines),
+        "first_line": lines[0] if lines else "",
+        "last_line": lines[-1] if lines else "",
     }
 
 
