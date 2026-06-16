@@ -885,19 +885,34 @@ async def write_prescription(request: Request):
 
         def med_line(m, lang, idx):
             timings_keys = [k for k in ["morning", "afternoon", "evening", "night"] if m.get(k)]
-            icons = " + ".join(timing_icons[k] for k in timings_keys)
-            qty = m.get("qty_per_dose", 1) or 1
-            qty_str = f" × {qty}" if qty != 1 else ""
-            if lang == "tamil":
-                labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
-                food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
-                dur = f"{m.get('duration_days', 5)} நாட்கள்"
+            td = m.get("timing_details") or {}
+            dur_days = m.get('duration_days', 5)
+            inst = f"\n   📝 {m['instructions']}" if m.get("instructions") else ""
+            if td:
+                parts = []
+                for k in timings_keys:
+                    t = td.get(k, {})
+                    qty = t.get("qty", 1)
+                    bf = t.get("before_food", False)
+                    lbl = timing_labels_ta[k] if lang == "tamil" else timing_labels_en[k]
+                    food_str = ("முன்" if bf else "பின்") if lang == "tamil" else ("before food" if bf else "after food")
+                    parts.append(f"{timing_icons[k]} {lbl}: {qty} tab(s) {food_str}")
+                timing_str = "\n   ".join(parts)
+                dur = f"{dur_days} {'நாட்கள்' if lang == 'tamil' else 'days'}"
+                return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}\n   {timing_str}\n   ⏱ {dur}{inst}"
             else:
-                labels = " + ".join(timing_labels_en[k] for k in timings_keys)
-                food = "Before food" if m.get("before_food") else "After food"
-                dur = f"{m.get('duration_days', 5)} days"
-            inst = f"\n   {m['instructions']}" if m.get("instructions") else ""
-            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons} {labels} | {food} | {dur}{inst}"
+                icons_str = " + ".join(timing_icons[k] for k in timings_keys)
+                qty = m.get("qty_per_dose", 1) or 1
+                qty_str = f" × {qty} tab(s)"
+                if lang == "tamil":
+                    labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
+                    food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
+                    dur = f"{dur_days} நாட்கள்"
+                else:
+                    labels = " + ".join(timing_labels_en[k] for k in timings_keys)
+                    food = "Before food" if m.get("before_food") else "After food"
+                    dur = f"{dur_days} days"
+                return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons_str} {labels} | {food} | {dur}{inst}"
 
         med_lines = "\n\n".join(med_line(m, language, i+1) for i, m in enumerate(medicines_input) if m.get("medicine_name","").strip())
 
@@ -1788,7 +1803,7 @@ async def get_prescription_detail(prescription_id: str):
 
 
 @app.put("/prescriptions/{prescription_id}")
-async def update_prescription(prescription_id: str, request: Request):
+async def update_prescription(prescription_id: str, request: Request, background_tasks: BackgroundTasks):
     from database import supabase
     body = await request.json()
 
@@ -1831,7 +1846,16 @@ async def update_prescription(prescription_id: str, request: Request):
     if med_rows:
         supabase.table("prescription_medicines").insert(med_rows).execute()
 
-    # 4. Fetch patient info and send WhatsApp with updated prescription
+    # 4a. Deduct stock for updated prescription (background task)
+    try:
+        pres_res = supabase.table("prescriptions").select("doctor_id").eq("id", prescription_id).limit(1).execute()
+        doc_id = pres_res.data[0]["doctor_id"] if pres_res.data else body.get("doctor_id", "")
+        if doc_id:
+            background_tasks.add_task(deduct_stock_for_prescription, prescription_id, doc_id, medicines)
+    except Exception as se:
+        print(f"⚠️ Stock deduction setup error on update: {se}")
+
+    # 4b. Fetch patient info and send WhatsApp with updated prescription
     whatsapp_sent = False
     try:
         import datetime as dt, pytz
@@ -1854,19 +1878,34 @@ async def update_prescription(prescription_id: str, request: Request):
 
         def med_line(m, lang, idx):
             timings_keys = [k for k in ["morning", "afternoon", "evening", "night"] if m.get(k)]
-            icons = " + ".join(timing_icons[k] for k in timings_keys)
-            qty = m.get("qty_per_dose", 1) or 1
-            qty_str = f" × {qty}" if qty != 1 else ""
-            if lang == "tamil":
-                labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
-                food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
-                dur = f"{m.get('duration_days', 5)} நாட்கள்"
+            td = m.get("timing_details") or {}
+            dur_days = m.get('duration_days', 5)
+            inst = f"\n   📝 {m['instructions']}" if m.get("instructions") else ""
+            if td:
+                parts = []
+                for k in timings_keys:
+                    t = td.get(k, {})
+                    qty = t.get("qty", 1)
+                    bf = t.get("before_food", False)
+                    lbl = timing_labels_ta[k] if lang == "tamil" else timing_labels_en[k]
+                    food_str = ("முன்" if bf else "பின்") if lang == "tamil" else ("before food" if bf else "after food")
+                    parts.append(f"{timing_icons[k]} {lbl}: {qty} tab(s) {food_str}")
+                timing_str = "\n   ".join(parts)
+                dur = f"{dur_days} {'நாட்கள்' if lang == 'tamil' else 'days'}"
+                return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}\n   {timing_str}\n   ⏱ {dur}{inst}"
             else:
-                labels = " + ".join(timing_labels_en[k] for k in timings_keys)
-                food = "Before food" if m.get("before_food") else "After food"
-                dur = f"{m.get('duration_days', 5)} days"
-            inst = f"\n   {m['instructions']}" if m.get("instructions") else ""
-            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons} {labels} | {food} | {dur}{inst}"
+                icons_str = " + ".join(timing_icons[k] for k in timings_keys)
+                qty = m.get("qty_per_dose", 1) or 1
+                qty_str = f" × {qty} tab(s)"
+                if lang == "tamil":
+                    labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
+                    food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
+                    dur = f"{dur_days} நாட்கள்"
+                else:
+                    labels = " + ".join(timing_labels_en[k] for k in timings_keys)
+                    food = "Before food" if m.get("before_food") else "After food"
+                    dur = f"{dur_days} days"
+                return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons_str} {labels} | {food} | {dur}{inst}"
 
         valid_meds = [m for m in medicines if m.get("medicine_name", "").strip()]
         med_lines = "\n\n".join(med_line(m, language, i+1) for i, m in enumerate(valid_meds))
@@ -1963,14 +2002,23 @@ async def deduct_stock_for_prescription(prescription_id: str, doctor_id: str, me
             medicine = med_res.data[0]
             medicine_id = medicine["id"]
 
-            doses_per_day = sum([
-                1 if med.get("morning") else 0,
-                1 if med.get("afternoon") else 0,
-                1 if med.get("evening") else 0,
-                1 if med.get("night") else 0,
-            ])
-            qty_per_dose = float(med.get("qty_per_dose") or 1)
-            tablets_needed = round(doses_per_day * int(med.get("duration_days") or 1) * qty_per_dose)
+            td = med.get("timing_details") or {}
+            if td:
+                # Sum actual qty for each enabled timing
+                daily_qty = sum(
+                    float(v.get("qty", 1))
+                    for k, v in td.items()
+                    if med.get(k)
+                )
+            else:
+                doses_per_day = sum([
+                    1 if med.get("morning") else 0,
+                    1 if med.get("afternoon") else 0,
+                    1 if med.get("evening") else 0,
+                    1 if med.get("night") else 0,
+                ])
+                daily_qty = doses_per_day * float(med.get("qty_per_dose") or 1)
+            tablets_needed = round(daily_qty * int(med.get("duration_days") or 1))
             if tablets_needed <= 0:
                 continue
 
