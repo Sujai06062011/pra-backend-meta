@@ -35,40 +35,6 @@ JAAS_API_KEY_ID = os.getenv("JAAS_API_KEY_ID", "")
 JAAS_PRIVATE_KEY_STR = os.getenv("JAAS_PRIVATE_KEY", "")
 
 
-def _load_private_key(raw: str):
-    """Try multiple normalisation strategies for Railway-stored PEM keys."""
-    # Strategy 1: literal \n → real newline
-    pem = raw.replace("\\n", "\n").strip()
-    # Strategy 2: if still one long line, insert newlines at PEM header/footer/64-char chunks
-    if "\n" not in pem:
-        # Split on the PEM markers and reformat
-        import re
-        pem = re.sub(r"(-----BEGIN [^-]+-----)(.+?)(-----END [^-]+-----)",
-                     lambda m: m.group(1) + "\n" +
-                               "\n".join(m.group(2).strip().replace(" ", "").split()) + "\n" +
-                               m.group(3),
-                     pem, flags=re.DOTALL)
-        # chunk body into 64-char lines
-        lines = pem.splitlines()
-        out = []
-        for line in lines:
-            if line.startswith("-----"):
-                out.append(line)
-            else:
-                # re-chunk
-                body = "".join(out_line for out_line in line.split() if not out_line.startswith("-----"))
-                out.extend([body[i:i+64] for i in range(0, len(body), 64)])
-        pem = "\n".join(out)
-    for attempt in (pem, pem + "\n"):
-        try:
-            return serialization.load_pem_private_key(
-                attempt.encode(), password=None, backend=default_backend()
-            )
-        except Exception:
-            pass
-    raise ValueError(f"Cannot deserialize private key. Starts with: {repr(raw[:80])}")
-
-
 def generate_jaas_jwt(
     room_name: str,
     user_name: str,
@@ -76,7 +42,18 @@ def generate_jaas_jwt(
     is_moderator: bool = False,
 ) -> str:
     try:
-        private_key = _load_private_key(JAAS_PRIVATE_KEY_STR)
+        private_key_pem = JAAS_PRIVATE_KEY_STR.replace("\\n", "\n")
+
+        if "-----BEGIN" not in private_key_pem:
+            private_key_pem = (
+                "-----BEGIN PRIVATE KEY-----\n"
+                + private_key_pem.strip()
+                + "\n-----END PRIVATE KEY-----"
+            )
+
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode(), password=None, backend=default_backend()
+        )
         now = int(time_module.time())
         payload = {
             "iss": "chat",
