@@ -1846,14 +1846,23 @@ async def update_prescription(prescription_id: str, request: Request, background
     if med_rows:
         supabase.table("prescription_medicines").insert(med_rows).execute()
 
-    # 4a. Deduct stock for updated prescription (background task)
+    # 4a. Update or create dispense order for updated prescription
     try:
-        pres_res = supabase.table("prescriptions").select("doctor_id").eq("id", prescription_id).limit(1).execute()
-        doc_id = pres_res.data[0]["doctor_id"] if pres_res.data else body.get("doctor_id", "")
+        pres_res = supabase.table("prescriptions").select("doctor_id, patient_id").eq("id", prescription_id).limit(1).execute()
+        pres_row = pres_res.data[0] if pres_res.data else {}
+        doc_id = pres_row.get("doctor_id") or body.get("doctor_id", "")
+        pat_id  = pres_row.get("patient_id") or body.get("patient_id")
         if doc_id:
-            background_tasks.add_task(deduct_stock_for_prescription, prescription_id, doc_id, medicines)
+            background_tasks.add_task(
+                upsert_dispense_order,
+                prescription_id=prescription_id,
+                doctor_id=doc_id,
+                patient_id=pat_id,
+                patient_name=None,
+                medicines=medicines,
+            )
     except Exception as se:
-        print(f"⚠️ Stock deduction setup error on update: {se}")
+        print(f"⚠️ Dispense order upsert error on update: {se}")
 
     # 4b. Fetch patient info and send WhatsApp with updated prescription
     whatsapp_sent = False
@@ -2057,6 +2066,199 @@ async def deduct_stock_for_prescription(prescription_id: str, doctor_id: str, me
     except Exception as e:
         print(f"[STOCK DEDUCTION ERROR] prescription {prescription_id}: {e}")
 
+
+def _calc_qty_prescribed(m: dict) -> float:
+    """Calculate total tablets for a full prescription course."""
+    td = m.get("timing_details") or {}
+    if td:
+        daily = sum(float(v.get("qty", 1)) for k, v in td.items() if m.get(k))
+    else:
+        doses = sum(1 for k in ["morning", "afternoon", "evening", "night"] if m.get(k))
+        daily = doses * float(m.get("qty_per_dose") or 1)
+    return max(1.0, round(daily * int(m.get("duration_days") or 1), 2))
+
+
+async def create_dispense_order(prescription_id: str, doctor_id: str, patient_id, patient_name, medicines: list):
+    """Create a dispense order after prescription save — runs as background task."""
+    from database import supabase as db
+    try:
+        order_res = db.table("dispense_orders").insert({
+            "prescription_id": prescription_id,
+            "doctor_id":       doctor_id,
+            "patient_id":      patient_id,
+            "patient_name":    patient_name,
+            "status":          "pending",
+        }).execute()
+        order_id = order_res.data[0]["id"] if order_res.data else None
+        if not order_id:
+            return
+        items = []
+        for m in medicines:
+            if not m.get("medicine_name", "").strip():
+                continue
+            items.append({
+                "dispense_order_id": order_id,
+                "medicine_id":       m.get("medicine_id"),
+                "medicine_name":     m["medicine_name"],
+                "dosage":            m.get("dosage", ""),
+                "qty_prescribed":    _calc_qty_prescribed(m),
+                "qty_dispensed":     0,
+                "status":            "pending",
+            })
+        if items:
+            db.table("dispense_items").insert(items).execute()
+        print(f"[DISPENSE] Order created for prescription {prescription_id}")
+    except Exception as e:
+        print(f"[DISPENSE] Error creating order for {prescription_id}: {e}")
+
+
+async def upsert_dispense_order(prescription_id: str, doctor_id: str, patient_id, patient_name, medicines: list):
+    """On prescription update: delete pending order and recreate with new medicines."""
+    from database import supabase as db
+    try:
+        existing = db.table("dispense_orders").select("id, status").eq("prescription_id", prescription_id).execute()
+        for row in (existing.data or []):
+            if row["status"] in ("pending", "partial"):
+                db.table("dispense_items").delete().eq("dispense_order_id", row["id"]).execute()
+                db.table("dispense_orders").delete().eq("id", row["id"]).execute()
+        await create_dispense_order(prescription_id, doctor_id, patient_id, patient_name, medicines)
+    except Exception as e:
+        print(f"[DISPENSE] Error upserting order for {prescription_id}: {e}")
+
+
+async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: str, qty: float, dispense_order_id: str):
+    """FIFO stock deduction for a single medicine at dispense time."""
+    from database import supabase as db
+    from datetime import date
+    try:
+        if medicine_id_hint:
+            med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("id", medicine_id_hint).limit(1).execute()
+        else:
+            med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("doctor_id", doctor_id).eq("name", medicine_name).limit(1).execute()
+            if not med_res.data:
+                med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("doctor_id", doctor_id).ilike("name", f"%{medicine_name}%").limit(1).execute()
+        if not med_res.data:
+            print(f"[DISPENSE DEDUCT] Medicine not found: {medicine_name}")
+            return
+        medicine = med_res.data[0]
+        medicine_id = medicine["id"]
+        batches = db.table("medicine_stock").select("id, tablets_remaining, expiry_date").eq("medicine_id", medicine_id).eq("is_active", True).gte("expiry_date", date.today().isoformat()).order("expiry_date", desc=False).execute()
+        remaining = float(qty)
+        for batch in (batches.data or []):
+            if remaining <= 0:
+                break
+            avail = float(batch["tablets_remaining"] or 0)
+            if avail <= 0:
+                continue
+            deduct = min(avail, remaining)
+            new_remaining = avail - deduct
+            db.table("medicine_stock").update({
+                "tablets_remaining": new_remaining,
+                "is_active": new_remaining > 0,
+            }).eq("id", batch["id"]).execute()
+            db.table("stock_transactions").insert({
+                "medicine_id":       medicine_id,
+                "stock_batch_id":    batch["id"],
+                "doctor_id":         doctor_id,
+                "transaction_type":  "dispensed",
+                "quantity_change":   -deduct,
+                "reference_id":      dispense_order_id,
+                "notes":             "Dispensed at pharmacy counter",
+            }).execute()
+            remaining -= deduct
+    except Exception as e:
+        print(f"[DISPENSE DEDUCT] Error for {medicine_name}: {e}")
+
+
+@app.get("/dispense-orders")
+async def list_dispense_orders(doctor_id: str, status: str = "pending,partial"):
+    from database import supabase as db
+    statuses = [s.strip() for s in status.split(",")]
+    result = db.table("dispense_orders").select(
+        "*, patients(name, mobile, patient_code), dispense_items(*)"
+    ).eq("doctor_id", doctor_id).in_("status", statuses).order("created_at", desc=True).execute()
+    return result.data or []
+
+
+@app.get("/dispense-orders/{order_id}")
+async def get_dispense_order(order_id: str):
+    from database import supabase as db
+    result = db.table("dispense_orders").select(
+        "*, patients(name, mobile, patient_code), dispense_items(*)"
+    ).eq("id", order_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Dispense order not found")
+    return result.data[0]
+
+
+@app.post("/dispense-orders/{order_id}/dispense")
+async def process_dispense(order_id: str, request: Request, background_tasks: BackgroundTasks):
+    """
+    Body: { items: [ { item_id, action: 'dispense'|'external'|'pending', qty: number } ] }
+    - dispense: deduct qty from stock, mark item dispensed
+    - external: mark item as patient buying outside (no stock change)
+    - pending: leave item for later
+    """
+    from database import supabase as db
+    body = await request.json()
+    item_actions = body.get("items", [])
+
+    order_res = db.table("dispense_orders").select("*, dispense_items(*)").eq("id", order_id).limit(1).execute()
+    if not order_res.data:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = order_res.data[0]
+    doctor_id = order["doctor_id"]
+
+    import datetime as dt, pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    now_str = dt.datetime.now(IST).isoformat()
+
+    for action_req in item_actions:
+        item_id = action_req.get("item_id")
+        action  = action_req.get("action")
+        qty     = float(action_req.get("qty") or 0)
+
+        item = next((i for i in (order.get("dispense_items") or []) if i["id"] == item_id), None)
+        if not item:
+            continue
+
+        if action == "dispense" and qty > 0:
+            db.table("dispense_items").update({
+                "qty_dispensed": (float(item.get("qty_dispensed") or 0)) + qty,
+                "status":        "dispensed",
+                "dispensed_at":  now_str,
+            }).eq("id", item_id).execute()
+            background_tasks.add_task(
+                _deduct_for_dispense,
+                medicine_id_hint=item.get("medicine_id"),
+                medicine_name=item["medicine_name"],
+                doctor_id=doctor_id,
+                qty=qty,
+                dispense_order_id=order_id,
+            )
+        elif action == "external":
+            db.table("dispense_items").update({
+                "status": "external",
+            }).eq("id", item_id).execute()
+
+    # Recalculate order status from all items
+    updated_items = db.table("dispense_items").select("status").eq("dispense_order_id", order_id).execute()
+    statuses = [i["status"] for i in (updated_items.data or [])]
+    if all(s in ("dispensed", "external") for s in statuses):
+        order_status = "completed"
+    elif any(s in ("dispensed", "external") for s in statuses):
+        order_status = "partial"
+    else:
+        order_status = "pending"
+
+    db.table("dispense_orders").update({
+        "status":     order_status,
+        "updated_at": now_str,
+    }).eq("id", order_id).execute()
+
+    return {"ok": True, "order_status": order_status}
+
+
 @app.post("/prescriptions")
 async def create_prescription_v2(request: Request, background_tasks: BackgroundTasks):
     from database import supabase as db
@@ -2168,12 +2370,14 @@ async def create_prescription_v2(request: Request, background_tasks: BackgroundT
         except Exception:
             pass
 
-    # Background stock deduction — non-blocking
+    # Create dispense order for pharmacy (replaces auto-deduct)
     if pres_id and medicines_input:
         background_tasks.add_task(
-            deduct_stock_for_prescription,
+            create_dispense_order,
             prescription_id=pres_id,
             doctor_id=doctor_id_req,
+            patient_id=patient_id,
+            patient_name=walkin_name,
             medicines=medicines_input,
         )
 
