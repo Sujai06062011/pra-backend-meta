@@ -2176,13 +2176,32 @@ async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: 
 
 
 @app.get("/dispense-orders")
-async def list_dispense_orders(doctor_id: str, status: str = "pending,partial"):
+async def list_dispense_orders(
+    doctor_id: str,
+    status: str = "pending,partial",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 25,
+    offset: int = 0,
+):
     from database import supabase as db
     statuses = [s.strip() for s in status.split(",")]
-    result = db.table("dispense_orders").select(
-        "*, patients(name, mobile, patient_code), dispense_items(*)"
-    ).eq("doctor_id", doctor_id).in_("status", statuses).order("created_at", desc=True).execute()
-    return result.data or []
+    q = (
+        db.table("dispense_orders")
+        .select("*, patients(name, mobile, patient_code), dispense_items(*)", count="exact")
+        .eq("doctor_id", doctor_id)
+        .in_("status", statuses)
+        .order("created_at", desc=True)
+        .range(offset, offset + limit - 1)
+    )
+    if date_from:
+        q = q.gte("created_at", f"{date_from}T00:00:00")
+    if date_to:
+        q = q.lte("created_at", f"{date_to}T23:59:59")
+    result = q.execute()
+    total = result.count or 0
+    orders = result.data or []
+    return {"orders": orders, "total": total, "has_more": offset + len(orders) < total}
 
 
 @app.get("/dispense-orders/{order_id}")
