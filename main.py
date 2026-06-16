@@ -613,6 +613,79 @@ async def writeoff_stock(medicine_id: str, batch_id: str, request: Request):
 
     return {"ok": True, "deducted": deduct, "remaining": new_remaining}
 
+@app.patch("/medicine-stock/{batch_id}")
+async def edit_stock_batch(batch_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+
+    tx_res = db.table("stock_transactions").select("id").eq("stock_batch_id", batch_id).eq("transaction_type", "dispensed").execute()
+    has_dispensing = len(tx_res.data or []) > 0
+
+    update_data = {"updated_at": datetime.now(IST).isoformat()}
+
+    for field in ("batch_number", "expiry_date", "purchase_price_per_strip",
+                  "supplier_name", "invoice_number", "date_received"):
+        if field in body:
+            update_data[field] = body[field]
+
+    if "strips_received" in body and not has_dispensing:
+        batch_res = db.table("medicine_stock").select("medicine_id").eq("id", batch_id).single().execute()
+        med_res = db.table("clinic_medicines").select("tablets_per_strip").eq("id", batch_res.data["medicine_id"]).single().execute()
+        tablets_per_strip = (med_res.data.get("tablets_per_strip") or 10) if med_res.data else 10
+        new_strips = int(body["strips_received"])
+        new_tablets = new_strips * tablets_per_strip
+        update_data["strips_received"] = new_strips
+        update_data["tablets_received"] = new_tablets
+        update_data["tablets_remaining"] = new_tablets
+
+    result = db.table("medicine_stock").update(update_data).eq("id", batch_id).execute()
+    return {
+        "success": True,
+        "batch": result.data[0] if result.data else None,
+        "strips_editable": not has_dispensing,
+    }
+
+@app.post("/medicine-stock/{batch_id}/adjust")
+async def adjust_stock(batch_id: str, request: Request):
+    from database import supabase as db
+    body = await request.json()
+
+    batch_res = db.table("medicine_stock").select("*, clinic_medicines(id, doctor_id)").eq("id", batch_id).single().execute()
+    if not batch_res.data:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    batch = batch_res.data
+    current_remaining = batch["tablets_remaining"]
+    adjusted_quantity = int(body["adjusted_quantity"])
+    difference = adjusted_quantity - current_remaining
+
+    db.table("medicine_stock").update({
+        "tablets_remaining": adjusted_quantity,
+        "is_active": adjusted_quantity > 0,
+        "updated_at": datetime.now(IST).isoformat(),
+    }).eq("id", batch_id).execute()
+
+    reason = body.get("reason", "Manual adjustment")
+    notes = body.get("notes", "")
+    note_str = f"Adjustment: {reason}. {notes}".strip(". ") if notes else f"Adjustment: {reason}"
+
+    db.table("stock_transactions").insert({
+        "medicine_id": batch["medicine_id"],
+        "stock_batch_id": batch_id,
+        "doctor_id": batch["clinic_medicines"]["doctor_id"],
+        "transaction_type": "adjustment",
+        "quantity_change": difference,
+        "notes": note_str,
+        "created_at": datetime.now(IST).isoformat(),
+    }).execute()
+
+    return {
+        "success": True,
+        "previous_quantity": current_remaining,
+        "adjusted_quantity": adjusted_quantity,
+        "difference": difference,
+    }
+
 @app.get("/medicines/{medicine_id}/transactions")
 async def get_medicine_transactions(medicine_id: str):
     from database import supabase as db
