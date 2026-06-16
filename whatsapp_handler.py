@@ -1,5 +1,10 @@
 from datetime import datetime, date, timedelta
 import re
+from consultation_helpers import (
+    is_online_consultation_slot,
+    create_consultation_for_appointment,
+    send_video_link_to_patient,
+)
 from database import (
     get_doctor_by_whatsapp, get_patient_by_mobile, get_conversation_state,
     save_conversation_state, get_queue_status, get_patient_token_today, get_family_tokens_today,
@@ -623,7 +628,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             else:
                 # Token is always server-assigned (reuses cancelled slot's token)
                 token = assign_token_for_slot(doctor_id, parsed_date, selected_slot)
-                create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+                appt_row = create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+                appt_id  = appt_row["id"] if appt_row else None
 
                 display_tok = get_display_token(token, selected_slot)
 
@@ -647,6 +653,47 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     + MENU_HINT
                 )
                 new_state = "idle"
+
+                # ── Online consultation auto-create ──────────────────────────
+                print(f"[BOOKING CONFIRMED] date={parsed_date} time={selected_slot} "
+                      f"doctor={doctor_id} patient={booking_for}")
+                try:
+                    _pat_lang_res = _supa.table("patients").select("language") \
+                        .eq("id", booking_for).single().execute()
+                    _pat_lang = (_pat_lang_res.data or {}).get("language", "english") or "english"
+
+                    _is_online = await is_online_consultation_slot(
+                        supabase=_supa,
+                        doctor_id=doctor_id,
+                        appointment_date=parsed_date,
+                        appointment_time=selected_slot,
+                    )
+                    print(f"[ONLINE CHECK] date={parsed_date} time={selected_slot} "
+                          f"is_online={_is_online}")
+
+                    if _is_online and appt_id:
+                        _consult = await create_consultation_for_appointment(
+                            supabase=_supa,
+                            doctor_id=doctor_id,
+                            patient_id=booking_for,
+                            appointment_id=appt_id,
+                            appointment_date=parsed_date,
+                            appointment_time=selected_slot,
+                            chief_complaint="",
+                        )
+                        if _consult:
+                            await send_video_link_to_patient(
+                                mobile=from_number,
+                                room_url=_consult["room_url"],
+                                appointment_time=selected_slot,
+                                language=_pat_lang,
+                            )
+                            print(f"[ONLINE CONSULTATION] Video link sent to {from_number}")
+                except Exception as _oc_err:
+                    import traceback
+                    print(f"[ONLINE CHECK ERROR] {_oc_err}")
+                    traceback.print_exc()
+                # ── End online consultation block ────────────────────────────
         except (IndexError, ValueError):
             reply     = "Invalid choice. Please reply with a number from the list."
             new_state = "awaiting_slot"
