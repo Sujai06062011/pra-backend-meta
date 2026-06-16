@@ -1946,8 +1946,15 @@ async def deduct_stock_for_prescription(prescription_id: str, doctor_id: str, me
             med_name = med.get("medicine_name", "").strip()
             if not med_name:
                 continue
-            med_res = db.table("clinic_medicines").select("id, name, tablets_per_strip, low_stock_threshold").eq("doctor_id", doctor_id).ilike("name", f"%{med_name}%").limit(1).execute()
+            med_id_direct = med.get("medicine_id")
+            if med_id_direct:
+                med_res = db.table("clinic_medicines").select("id, name, tablets_per_strip, low_stock_threshold").eq("id", med_id_direct).limit(1).execute()
+            else:
+                med_res = db.table("clinic_medicines").select("id, name, tablets_per_strip, low_stock_threshold").eq("doctor_id", doctor_id).eq("name", med_name).limit(1).execute()
+                if not med_res.data:
+                    med_res = db.table("clinic_medicines").select("id, name, tablets_per_strip, low_stock_threshold").eq("doctor_id", doctor_id).ilike("name", f"%{med_name}%").limit(1).execute()
             if not med_res.data:
+                print(f"[STOCK DEDUCTION] Medicine not found: {med_name} (id={med_id_direct})")
                 continue
             medicine = med_res.data[0]
             medicine_id = medicine["id"]
