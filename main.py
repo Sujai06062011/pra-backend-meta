@@ -886,6 +886,8 @@ async def write_prescription(request: Request):
         def med_line(m, lang, idx):
             timings_keys = [k for k in ["morning", "afternoon", "evening", "night"] if m.get(k)]
             icons = " + ".join(timing_icons[k] for k in timings_keys)
+            qty = m.get("qty_per_dose", 1) or 1
+            qty_str = f" × {qty}" if qty != 1 else ""
             if lang == "tamil":
                 labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
                 food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
@@ -895,7 +897,7 @@ async def write_prescription(request: Request):
                 food = "Before food" if m.get("before_food") else "After food"
                 dur = f"{m.get('duration_days', 5)} days"
             inst = f"\n   {m['instructions']}" if m.get("instructions") else ""
-            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}\n   {icons} {labels} | {food} | {dur}{inst}"
+            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons} {labels} | {food} | {dur}{inst}"
 
         med_lines = "\n\n".join(med_line(m, language, i+1) for i, m in enumerate(medicines_input) if m.get("medicine_name","").strip())
 
@@ -1853,6 +1855,8 @@ async def update_prescription(prescription_id: str, request: Request):
         def med_line(m, lang, idx):
             timings_keys = [k for k in ["morning", "afternoon", "evening", "night"] if m.get(k)]
             icons = " + ".join(timing_icons[k] for k in timings_keys)
+            qty = m.get("qty_per_dose", 1) or 1
+            qty_str = f" × {qty}" if qty != 1 else ""
             if lang == "tamil":
                 labels = " + ".join(timing_labels_ta[k] for k in timings_keys)
                 food = "சாப்பிடுவதற்கு முன்" if m.get("before_food") else "சாப்பிட்ட பின்"
@@ -1862,7 +1866,7 @@ async def update_prescription(prescription_id: str, request: Request):
                 food = "Before food" if m.get("before_food") else "After food"
                 dur = f"{m.get('duration_days', 5)} days"
             inst = f"\n   {m['instructions']}" if m.get("instructions") else ""
-            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}\n   {icons} {labels} | {food} | {dur}{inst}"
+            return f"{idx}. {m['medicine_name']} — {m.get('dosage','')}{qty_str}\n   {icons} {labels} | {food} | {dur}{inst}"
 
         valid_meds = [m for m in medicines if m.get("medicine_name", "").strip()]
         med_lines = "\n\n".join(med_line(m, language, i+1) for i, m in enumerate(valid_meds))
@@ -1965,7 +1969,8 @@ async def deduct_stock_for_prescription(prescription_id: str, doctor_id: str, me
                 1 if med.get("evening") else 0,
                 1 if med.get("night") else 0,
             ])
-            tablets_needed = doses_per_day * int(med.get("duration_days") or 1)
+            qty_per_dose = float(med.get("qty_per_dose") or 1)
+            tablets_needed = round(doses_per_day * int(med.get("duration_days") or 1) * qty_per_dose)
             if tablets_needed <= 0:
                 continue
 
