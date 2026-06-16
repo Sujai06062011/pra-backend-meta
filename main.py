@@ -2243,16 +2243,20 @@ async def process_dispense(order_id: str, request: Request, background_tasks: Ba
                 prescription_id=prescription_id,
             )
         elif action == "external":
+            # If some qty was already dispensed from clinic, mark as partial (not external)
+            already_dispensed = float(item.get("qty_dispensed") or 0)
+            new_status = "partial" if already_dispensed > 0 else "external"
             db.table("dispense_items").update({
-                "status": "external",
+                "status": new_status,
             }).eq("id", item_id).execute()
 
     # Recalculate order status from all items
+    DONE_STATUSES = ("dispensed", "external", "partial")
     updated_items = db.table("dispense_items").select("status").eq("dispense_order_id", order_id).execute()
     statuses = [i["status"] for i in (updated_items.data or [])]
-    if all(s in ("dispensed", "external") for s in statuses):
+    if all(s in DONE_STATUSES for s in statuses):
         order_status = "completed"
-    elif any(s in ("dispensed", "external") for s in statuses):
+    elif any(s in DONE_STATUSES for s in statuses):
         order_status = "partial"
     else:
         order_status = "pending"
@@ -2348,11 +2352,12 @@ async def return_dispense_item(order_id: str, request: Request):
     }).eq("id", item_id).execute()
 
     # Recalculate order status
+    DONE_STATUSES = ("dispensed", "external", "partial")
     updated_items = db.table("dispense_items").select("status").eq("dispense_order_id", order_id).execute()
     item_statuses = [i["status"] for i in (updated_items.data or [])]
-    if all(s in ("dispensed", "external") for s in item_statuses):
+    if all(s in DONE_STATUSES for s in item_statuses):
         order_status = "completed"
-    elif any(s in ("dispensed", "external") for s in item_statuses):
+    elif any(s in DONE_STATUSES for s in item_statuses):
         order_status = "partial"
     else:
         order_status = "pending"
