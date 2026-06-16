@@ -2265,6 +2265,107 @@ async def process_dispense(order_id: str, request: Request, background_tasks: Ba
     return {"ok": True, "order_status": order_status}
 
 
+@app.post("/dispense-orders/{order_id}/return")
+async def return_dispense_item(order_id: str, request: Request):
+    """
+    Return medicines to stock — handles wrong qty or patient returning unused medicines.
+    Body: { item_id, qty }
+    - Adds qty back to the medicine's most recent batch
+    - Logs a 'returned' transaction
+    - Resets dispense_item to pending so staff can re-dispense correct qty
+    - Recalculates order status
+    """
+    from database import supabase as db
+    import datetime as dt, pytz
+    body = await request.json()
+    item_id = body.get("item_id")
+    qty     = float(body.get("qty") or 0)
+
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="qty must be > 0")
+
+    order_res = db.table("dispense_orders").select("*, dispense_items(*)").eq("id", order_id).limit(1).execute()
+    if not order_res.data:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order = order_res.data[0]
+    doctor_id       = order["doctor_id"]
+    prescription_id = order["prescription_id"]
+
+    item = next((i for i in (order.get("dispense_items") or []) if i["id"] == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Dispense item not found")
+
+    IST     = pytz.timezone("Asia/Kolkata")
+    now_str = dt.datetime.now(IST).isoformat()
+
+    # Find the clinic_medicine record
+    medicine_id_hint = item.get("medicine_id")
+    medicine_name    = item["medicine_name"]
+    if medicine_id_hint:
+        med_res = db.table("clinic_medicines").select("id, name").eq("id", medicine_id_hint).limit(1).execute()
+    else:
+        med_res = db.table("clinic_medicines").select("id, name").eq("doctor_id", doctor_id).eq("name", medicine_name).limit(1).execute()
+        if not med_res.data:
+            med_res = db.table("clinic_medicines").select("id, name").eq("doctor_id", doctor_id).ilike("name", f"%{medicine_name}%").limit(1).execute()
+
+    if not med_res.data:
+        raise HTTPException(status_code=404, detail=f"Medicine not found in clinic catalogue: {medicine_name}")
+
+    clinic_med_id = med_res.data[0]["id"]
+
+    # Find the most recent stock batch for this medicine to return into
+    batch_res = db.table("medicine_stock").select("id, tablets_remaining, expiry_date").eq("medicine_id", clinic_med_id).order("expiry_date", desc=True).limit(1).execute()
+    if not batch_res.data:
+        raise HTTPException(status_code=404, detail=f"No stock batch found for {medicine_name}")
+
+    batch    = batch_res.data[0]
+    batch_id = batch["id"]
+    new_remaining = int(round(float(batch.get("tablets_remaining") or 0) + qty))
+
+    # Add stock back
+    db.table("medicine_stock").update({
+        "tablets_remaining": new_remaining,
+        "is_active":         True,
+    }).eq("id", batch_id).execute()
+
+    # Log return transaction
+    db.table("stock_transactions").insert({
+        "medicine_id":      clinic_med_id,
+        "stock_batch_id":   batch_id,
+        "doctor_id":        doctor_id,
+        "transaction_type": "returned",
+        "quantity_change":  int(round(qty)),
+        "reference_id":     prescription_id,
+        "notes":            f"Returned to stock — {body.get('reason', 'Wrong qty / patient return')}",
+    }).execute()
+
+    # Reset dispense item to pending
+    new_qty_dispensed = max(0, float(item.get("qty_dispensed") or 0) - qty)
+    db.table("dispense_items").update({
+        "qty_dispensed": int(round(new_qty_dispensed)),
+        "status":        "pending",
+        "dispensed_at":  None,
+    }).eq("id", item_id).execute()
+
+    # Recalculate order status
+    updated_items = db.table("dispense_items").select("status").eq("dispense_order_id", order_id).execute()
+    item_statuses = [i["status"] for i in (updated_items.data or [])]
+    if all(s in ("dispensed", "external") for s in item_statuses):
+        order_status = "completed"
+    elif any(s in ("dispensed", "external") for s in item_statuses):
+        order_status = "partial"
+    else:
+        order_status = "pending"
+
+    db.table("dispense_orders").update({
+        "status":     order_status,
+        "updated_at": now_str,
+    }).eq("id", order_id).execute()
+
+    print(f"[DISPENSE RETURN] {qty} units of {medicine_name} returned to batch {batch_id} (new total: {new_remaining})")
+    return {"ok": True, "order_status": order_status, "new_stock": new_remaining}
+
+
 @app.post("/prescriptions")
 async def create_prescription_v2(request: Request, background_tasks: BackgroundTasks):
     from database import supabase as db
