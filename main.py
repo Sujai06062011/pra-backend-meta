@@ -2155,7 +2155,7 @@ async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: 
             if avail <= 0:
                 continue
             deduct = min(avail, remaining)
-            new_remaining = avail - deduct
+            new_remaining = int(round(avail - deduct))
             db.table("medicine_stock").update({
                 "tablets_remaining": new_remaining,
                 "is_active": new_remaining > 0,
@@ -2165,7 +2165,7 @@ async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: 
                 "stock_batch_id":    batch["id"],
                 "doctor_id":         doctor_id,
                 "transaction_type":  "dispensed",
-                "quantity_change":   -deduct,
+                "quantity_change":   -int(round(deduct)),
                 "reference_id":      prescription_id,
                 "notes":             "Dispensed at pharmacy counter",
             }).execute()
