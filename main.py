@@ -18,11 +18,87 @@ from followup import prewarm_response_audios
 from database import supabase, save_conversation_state as upsert_conversation_state
 from database import get_display_token, assign_token_for_slot, is_slot_available, _time_str
 import config_loader
+import jwt as pyjwt
+import time as time_module
+import uuid as uuid_lib
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 
 load_dotenv()
 
 IST = pytz.timezone("Asia/Kolkata")
+
+# ── JaaS (8x8 Video) ─────────────────────────────────────────────────────────
+JAAS_APP_ID = os.getenv("JAAS_APP_ID", "")
+JAAS_API_KEY_ID = os.getenv("JAAS_API_KEY_ID", "")
+JAAS_PRIVATE_KEY_STR = os.getenv("JAAS_PRIVATE_KEY", "")
+
+
+def generate_jaas_jwt(
+    room_name: str,
+    user_name: str,
+    user_email: str = "user@praclinic.in",
+    is_moderator: bool = False,
+) -> str:
+    try:
+        private_key_pem = JAAS_PRIVATE_KEY_STR.replace("\\n", "\n")
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode(), password=None, backend=default_backend()
+        )
+        now = int(time_module.time())
+        payload = {
+            "iss": "chat",
+            "iat": now,
+            "exp": now + 7200,
+            "nbf": now - 10,
+            "aud": "jitsi",
+            "sub": JAAS_APP_ID,
+            "room": room_name,
+            "context": {
+                "features": {
+                    "livestreaming": False,
+                    "outbound-call": False,
+                    "sip-outbound-call": False,
+                    "transcription": False,
+                    "recording": is_moderator,
+                },
+                "user": {
+                    "hidden-from-recorder": False,
+                    "moderator": is_moderator,
+                    "name": user_name,
+                    "id": str(uuid_lib.uuid4()),
+                    "avatar": "",
+                    "email": user_email,
+                },
+            },
+        }
+        token = pyjwt.encode(
+            payload,
+            private_key,
+            algorithm="RS256",
+            headers={"kid": JAAS_API_KEY_ID},
+        )
+        return token
+    except Exception as e:
+        print(f"[JaaS JWT Error] {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate video token: {e}")
+
+
+def generate_room_id(doctor_name: str, scheduled_at: datetime) -> str:
+    clean_name = (
+        doctor_name.lower().replace(" ", "-").replace(".", "").replace("dr-", "dr")[:15]
+    )
+    time_str = scheduled_at.strftime("%Y%m%d-%H%M%S")
+    suffix = str(uuid_lib.uuid4())[:6]
+    return f"{clean_name}-{time_str}-{suffix}"
+
+
+def get_patient_join_url(room_id: str) -> str:
+    return f"https://8x8.vc/{JAAS_APP_ID}/{room_id}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="PRA - Patient Relationship Assistant")
 
@@ -3032,3 +3108,255 @@ async def test_meta_interactive(request: Request):
         footer="Dr. Kumar Child Care Clinic"
     )
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ONLINE VIDEO CONSULTATIONS (JaaS / 8x8)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/consultations")
+async def create_consultation(request: Request):
+    body = await request.json()
+
+    appointment_id  = body.get("appointment_id")
+    patient_id      = body.get("patient_id")
+    doctor_id       = body.get("doctor_id", "8c33abe0-5d2e-4613-9437-c7c375e8d162")
+    scheduled_at_str = body.get("scheduled_at")
+    chief_complaint  = body.get("chief_complaint", "")
+
+    doctor_res  = supabase.table("doctors").select("name, clinic_name").eq("id", doctor_id).single().execute()
+    patient_res = supabase.table("patients").select("name, mobile, language").eq("id", patient_id).single().execute()
+
+    if not doctor_res.data or not patient_res.data:
+        raise HTTPException(status_code=404, detail="Doctor or patient not found")
+
+    if scheduled_at_str:
+        scheduled_at = datetime.fromisoformat(scheduled_at_str)
+    else:
+        scheduled_at = datetime.now(IST)
+
+    if scheduled_at.tzinfo is None:
+        scheduled_at = IST.localize(scheduled_at)
+
+    room_id  = generate_room_id(doctor_res.data["name"], scheduled_at)
+    room_url = get_patient_join_url(room_id)
+
+    row = supabase.table("consultations").insert({
+        "appointment_id":    appointment_id,
+        "patient_id":        patient_id,
+        "doctor_id":         doctor_id,
+        "room_id":           room_id,
+        "room_url":          room_url,
+        "scheduled_at":      scheduled_at.isoformat(),
+        "status":            "scheduled",
+        "consultation_type": "online",
+        "chief_complaint":   chief_complaint,
+        "patient_link_sent": False,
+    }).execute()
+
+    if appointment_id:
+        supabase.table("appointments").update({"consultation_type": "online"}).eq("id", appointment_id).execute()
+
+    return {
+        "success":        True,
+        "consultation":   row.data[0],
+        "room_id":        room_id,
+        "patient_join_url": room_url,
+    }
+
+
+@app.post("/consultations/{consultation_id}/send-link")
+async def send_consultation_link(consultation_id: str):
+    c_res = supabase.table("consultations") \
+        .select("*, patients(name, mobile, language), doctors(name, clinic_name)") \
+        .eq("id", consultation_id).single().execute()
+
+    if not c_res.data:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+
+    c       = c_res.data
+    patient = c["patients"]
+    doctor  = c["doctors"]
+
+    scheduled_dt = datetime.fromisoformat(c["scheduled_at"].replace("Z", "+00:00")).astimezone(IST)
+    formatted_time = scheduled_dt.strftime("%d %b %Y at %I:%M %p")
+    lang     = (patient.get("language") or "english").lower()
+    room_url = c["room_url"]
+
+    if lang == "tamil":
+        message = (
+            f"வணக்கம் {patient['name']}! 🙏\n\n"
+            f"உங்கள் ஆன்லைன் கன்சல்டேஷன் உறுதி!\n\n"
+            f"📅 {formatted_time}\n"
+            f"👨‍⚕️ {doctor['name']}\n"
+            f"🏥 {doctor['clinic_name']}\n\n"
+            f"📱 Join link:\n{room_url}\n\n"
+            f"✅ Download தேவையில்லை\n"
+            f"✅ Login தேவையில்லை\n"
+            f"நேரத்தில் join ஆகுங்கள். நன்றி!"
+        )
+    elif lang == "hindi":
+        message = (
+            f"नमस्ते {patient['name']}! 🙏\n\n"
+            f"आपकी ऑनलाइन कंसल्टेशन कन्फर्म!\n\n"
+            f"📅 {formatted_time}\n"
+            f"👨‍⚕️ {doctor['name']}\n"
+            f"🏥 {doctor['clinic_name']}\n\n"
+            f"📱 Join link:\n{room_url}\n\n"
+            f"✅ कोई डाउनलोड नहीं\n"
+            f"✅ कोई लॉगिन नहीं\n"
+            f"समय पर जॉइन करें। धन्यवाद!"
+        )
+    else:
+        message = (
+            f"Hello {patient['name']}! 🙏\n\n"
+            f"Your online consultation is confirmed.\n\n"
+            f"📅 {formatted_time}\n"
+            f"👨‍⚕️ {doctor['name']}\n"
+            f"🏥 {doctor['clinic_name']}\n\n"
+            f"📱 Click to join:\n{room_url}\n\n"
+            f"✅ No download needed\n"
+            f"✅ No login required\n"
+            f"✅ Just click the link at appointment time\n\n"
+            f"Please join on time. Thank you!"
+        )
+
+    await send_meta_text(patient["mobile"], message)
+
+    supabase.table("consultations").update({
+        "patient_link_sent":    True,
+        "patient_link_sent_at": datetime.now(IST).isoformat(),
+    }).eq("id", consultation_id).execute()
+
+    return {"success": True}
+
+
+@app.get("/consultations/today")
+async def todays_consultations(doctor_id: str = "8c33abe0-5d2e-4613-9437-c7c375e8d162"):
+    today = datetime.now(IST).date().isoformat()
+    result = supabase.table("consultations") \
+        .select("*, patients(name, mobile, language)") \
+        .eq("doctor_id", doctor_id) \
+        .gte("scheduled_at", f"{today}T00:00:00+05:30") \
+        .lte("scheduled_at", f"{today}T23:59:59+05:30") \
+        .order("scheduled_at") \
+        .execute()
+    return {"consultations": result.data or []}
+
+
+@app.get("/consultations")
+async def list_consultations(
+    doctor_id: str = "8c33abe0-5d2e-4613-9437-c7c375e8d162",
+    status: str = None,
+    date: str = None,
+):
+    q = supabase.table("consultations") \
+        .select("*, patients(name, mobile)") \
+        .eq("doctor_id", doctor_id) \
+        .order("scheduled_at", desc=False)
+
+    if date:
+        q = q.gte("scheduled_at", f"{date}T00:00:00+05:30").lte("scheduled_at", f"{date}T23:59:59+05:30")
+    if status:
+        q = q.eq("status", status)
+
+    result = q.execute()
+    return {"consultations": result.data or []}
+
+
+@app.get("/consultations/{consultation_id}/doctor-token")
+async def get_doctor_token(consultation_id: str):
+    c_res = supabase.table("consultations") \
+        .select("*, doctors(name), patients(name)") \
+        .eq("id", consultation_id).single().execute()
+
+    if not c_res.data:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+
+    c = c_res.data
+    token = generate_jaas_jwt(
+        room_name    = c["room_id"],
+        user_name    = c["doctors"]["name"],
+        user_email   = "doctor@praclinic.in",
+        is_moderator = True,
+    )
+
+    # Only flip to in_progress if still scheduled
+    supabase.table("consultations").update({
+        "status":     "in_progress",
+        "started_at": datetime.now(IST).isoformat(),
+    }).eq("id", consultation_id).eq("status", "scheduled").execute()
+
+    return {
+        "token":        token,
+        "room_id":      c["room_id"],
+        "app_id":       JAAS_APP_ID,
+        "patient_name": c["patients"]["name"],
+        "domain":       "8x8.vc",
+    }
+
+
+@app.patch("/consultations/{consultation_id}/complete")
+async def complete_consultation(consultation_id: str, request: Request):
+    body = await request.json()
+
+    c_res = supabase.table("consultations").select("started_at").eq("id", consultation_id).single().execute()
+
+    duration_minutes = None
+    if c_res.data and c_res.data.get("started_at"):
+        start = datetime.fromisoformat(c_res.data["started_at"].replace("Z", "+00:00"))
+        duration_minutes = max(1, int((datetime.now(IST) - start).total_seconds() / 60))
+
+    supabase.table("consultations").update({
+        "status":           "completed",
+        "ended_at":         datetime.now(IST).isoformat(),
+        "duration_minutes": duration_minutes,
+        "doctor_notes":     body.get("doctor_notes", ""),
+    }).eq("id", consultation_id).execute()
+
+    return {"success": True, "duration_minutes": duration_minutes}
+
+
+@app.patch("/doctors/{doctor_id}/online-settings")
+async def update_online_settings(doctor_id: str, request: Request):
+    body = await request.json()
+    update_data = {}
+    if "online_consultation_enabled" in body:
+        update_data["online_consultation_enabled"] = body["online_consultation_enabled"]
+    if "online_consultation_hours" in body:
+        update_data["online_consultation_hours"] = body["online_consultation_hours"]
+    if "online_consultation_fee" in body:
+        update_data["online_consultation_fee"] = body["online_consultation_fee"]
+
+    supabase.table("doctors").update(update_data).eq("id", doctor_id).execute()
+    return {"success": True}
+
+
+@app.get("/doctors/{doctor_id}/online-settings")
+async def get_online_settings(doctor_id: str):
+    result = supabase.table("doctors") \
+        .select("online_consultation_enabled, online_consultation_hours, online_consultation_fee") \
+        .eq("id", doctor_id).single().execute()
+    return result.data or {
+        "online_consultation_enabled": False,
+        "online_consultation_hours":   [],
+        "online_consultation_fee":     0,
+    }
+
+
+@app.post("/test/create-consultation")
+async def test_create_consultation():
+    """Quick smoke-test: creates a consultation 30 mins from now for the test patient."""
+    from starlette.requests import Request as StarletteRequest
+    scheduled = datetime.now(IST) + timedelta(minutes=30)
+
+    class _FakeRequest:
+        async def json(self):
+            return {
+                "patient_id":       "aaaaaaaa-0000-0000-0000-000000000001",
+                "doctor_id":        "8c33abe0-5d2e-4613-9437-c7c375e8d162",
+                "scheduled_at":     scheduled.isoformat(),
+                "chief_complaint":  "Test consultation",
+            }
+
+    return await create_consultation(_FakeRequest())

@@ -6,3 +6,5 @@ twilio==9.1.0
 supabase==2.4.6
 python-multipart==0.0.9
 apscheduler==3.10.4
+PyJWT==2.8.0
+cryptography==42.0.0
