@@ -2126,23 +2126,27 @@ async def upsert_dispense_order(prescription_id: str, doctor_id: str, patient_id
         print(f"[DISPENSE] Error upserting order for {prescription_id}: {e}")
 
 
-async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: str, qty: float, dispense_order_id: str):
+async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: str, qty: float, prescription_id: str):
     """FIFO stock deduction for a single medicine at dispense time."""
     from database import supabase as db
     from datetime import date
+    print(f"[DISPENSE DEDUCT] Starting: {medicine_name} qty={qty} medicine_id={medicine_id_hint} doctor={doctor_id}")
     try:
         if medicine_id_hint:
             med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("id", medicine_id_hint).limit(1).execute()
+            print(f"[DISPENSE DEDUCT] Direct lookup result: {med_res.data}")
         else:
             med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("doctor_id", doctor_id).eq("name", medicine_name).limit(1).execute()
             if not med_res.data:
                 med_res = db.table("clinic_medicines").select("id, name, low_stock_threshold").eq("doctor_id", doctor_id).ilike("name", f"%{medicine_name}%").limit(1).execute()
+            print(f"[DISPENSE DEDUCT] Name lookup result: {med_res.data}")
         if not med_res.data:
             print(f"[DISPENSE DEDUCT] Medicine not found: {medicine_name}")
             return
         medicine = med_res.data[0]
         medicine_id = medicine["id"]
         batches = db.table("medicine_stock").select("id, tablets_remaining, expiry_date").eq("medicine_id", medicine_id).eq("is_active", True).gte("expiry_date", date.today().isoformat()).order("expiry_date", desc=False).execute()
+        print(f"[DISPENSE DEDUCT] Batches found: {len(batches.data or [])} for {medicine_name}")
         remaining = float(qty)
         for batch in (batches.data or []):
             if remaining <= 0:
@@ -2162,10 +2166,11 @@ async def _deduct_for_dispense(medicine_id_hint, medicine_name: str, doctor_id: 
                 "doctor_id":         doctor_id,
                 "transaction_type":  "dispensed",
                 "quantity_change":   -deduct,
-                "reference_id":      dispense_order_id,
+                "reference_id":      prescription_id,
                 "notes":             "Dispensed at pharmacy counter",
             }).execute()
             remaining -= deduct
+            print(f"[DISPENSE DEDUCT] Deducted {deduct} from batch {batch['id']}, remaining={new_remaining}")
     except Exception as e:
         print(f"[DISPENSE DEDUCT] Error for {medicine_name}: {e}")
 
@@ -2208,6 +2213,7 @@ async def process_dispense(order_id: str, request: Request, background_tasks: Ba
         raise HTTPException(status_code=404, detail="Order not found")
     order = order_res.data[0]
     doctor_id = order["doctor_id"]
+    prescription_id = order["prescription_id"]
 
     import datetime as dt, pytz
     IST = pytz.timezone("Asia/Kolkata")
@@ -2234,7 +2240,7 @@ async def process_dispense(order_id: str, request: Request, background_tasks: Ba
                 medicine_name=item["medicine_name"],
                 doctor_id=doctor_id,
                 qty=qty,
-                dispense_order_id=order_id,
+                prescription_id=prescription_id,
             )
         elif action == "external":
             db.table("dispense_items").update({
