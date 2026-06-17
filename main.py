@@ -374,7 +374,14 @@ async def meta_webhook_inbound(request: Request):
                 list_id = msg["interactive"]["list_reply"]["id"]
                 print(f"[Meta LIST_REPLY] from={from_number} id={list_id}")
                 if list_id.startswith("member_"):
-                    await handle_member_interactive(from_number, list_id, clinic_number)
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_booking_patient_select":
+                        print(f"[STALE] member list ignored, state={current_state}")
+                        await send_meta_text(from_number,
+                            "Your booking is already in progress.\n"
+                            "Reply MENU to start over or continue your booking.")
+                    else:
+                        await handle_member_interactive(from_number, list_id, clinic_number)
                 else:
                     list_id_to_text = {
                         "menu_book_appointment":  "1",
@@ -392,15 +399,29 @@ async def meta_webhook_inbound(request: Request):
                 button_id = msg["interactive"]["button_reply"]["id"]
                 print(f"[Meta BUTTON] from={from_number} id={button_id}")
                 if button_id.startswith("member_"):
-                    await handle_member_interactive(from_number, button_id, clinic_number)
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_booking_patient_select":
+                        print(f"[STALE] member button ignored, state={current_state}")
+                        await send_meta_text(from_number,
+                            "Your booking is already in progress.\n"
+                            "Reply MENU to start over or continue your booking.")
+                    else:
+                        await handle_member_interactive(from_number, button_id, clinic_number)
                 else:
                     parts = button_id.split("__", 1)
                     action = parts[0]
                     followup_id = parts[1] if len(parts) > 1 else None
 
                     if button_id in ("visit_in_clinic", "visit_online"):
-                        visit_type = "in_clinic" if button_id == "visit_in_clinic" else "online"
-                        await handle_visit_type_selected(from_number, visit_type, clinic_number)
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state != "awaiting_consult_type":
+                            print(f"[STALE] visit_type button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your booking is already in progress.\n"
+                                "Reply MENU to start over or continue your booking.")
+                        else:
+                            visit_type = "in_clinic" if button_id == "visit_in_clinic" else "online"
+                            await handle_visit_type_selected(from_number, visit_type, clinic_number)
                     elif followup_id:
                         if action == "ok":
                             supabase.table("followups").update({
