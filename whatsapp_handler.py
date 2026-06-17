@@ -48,7 +48,8 @@ def format_time(t: str) -> str:
 
 
 def generate_online_slots(doctor: dict, date_str: str, duration: int = 15) -> list:
-    """Generate online consultation time slots for a date from the doctor's online hours."""
+    """Generate online consultation time slots for a date from the doctor's online hours.
+    Returns list of (time_str, session_label) tuples."""
     from datetime import datetime as _dt, timedelta as _td
     hours = doctor.get("online_consultation_hours") or []
     day_name = date.fromisoformat(date_str).strftime("%A").lower()
@@ -56,13 +57,27 @@ def generate_online_slots(doctor: dict, date_str: str, duration: int = 15) -> li
     if not day_entry:
         return []
     slots = []
-    start_h, start_m = map(int, day_entry["start"].split(":"))
-    end_h, end_m = map(int, day_entry["end"].split(":"))
-    cur = _dt(2000, 1, 1, start_h, start_m)
-    end_t = _dt(2000, 1, 1, end_h, end_m)
-    while cur < end_t:
-        slots.append(cur.strftime("%H:%M"))
-        cur += _td(minutes=duration)
+
+    def _gen(start_str, end_str, session_label):
+        sh, sm = map(int, start_str.split(":"))
+        eh, em = map(int, end_str.split(":"))
+        cur = _dt(2000, 1, 1, sh, sm)
+        end_t = _dt(2000, 1, 1, eh, em)
+        while cur < end_t:
+            slots.append((cur.strftime("%H:%M"), session_label))
+            cur += _td(minutes=duration)
+
+    # New format: {day, morning:{enabled,start,end}, evening:{enabled,start,end}}
+    if "morning" in day_entry or "evening" in day_entry:
+        morning = day_entry.get("morning") or {}
+        evening = day_entry.get("evening") or {}
+        if morning.get("enabled"):
+            _gen(morning["start"], morning["end"], "morning")
+        if evening.get("enabled"):
+            _gen(evening["start"], evening["end"], "evening")
+    else:
+        # Legacy format: {day, start, end}
+        _gen(day_entry["start"], day_entry["end"], "online")
     return slots
 
 
@@ -595,10 +610,11 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 .execute()
             _booked_online = {(r["appointment_time"] or "")[:5] for r in (_booked_online_res.data or [])}
 
-            available = [
-                s for s in all_online
+            available_full = [
+                (s, sess) for s, sess in all_online
                 if s not in _booked_online and (not cutoff or s > cutoff)
             ]
+            available = [s for s, _ in available_full]
 
             if not all_online:
                 reply     = f"Sorry! No online consultation hours configured for {booking_date}. Try another date or choose In Clinic."
@@ -607,9 +623,20 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 reply     = f"Sorry! All online consultation slots for {booking_date} are booked. Please try another date."
                 new_state = "idle"
             else:
+                morning_online = [(s, sess) for s, sess in available_full if sess == "morning"]
+                evening_online = [(s, sess) for s, sess in available_full if sess != "morning"]
                 slot_list = f"💻 Online Consultation slots on {booking_date}:\n"
-                for idx, s in enumerate(available, 1):
-                    slot_list += f"{idx}. {format_time(s)}\n"
+                idx = 1
+                if morning_online:
+                    slot_list += "\n🌅 Morning\n"
+                    for s, _ in morning_online:
+                        slot_list += f"{idx}. {format_time(s)}\n"
+                        idx += 1
+                if evening_online:
+                    slot_list += "\n🌆 Evening\n"
+                    for s, _ in evening_online:
+                        slot_list += f"{idx}. {format_time(s)}\n"
+                        idx += 1
                 slot_list += "\nReply with slot number to confirm." + MENU_HINT
                 reply     = slot_list
                 new_state = "awaiting_slot"

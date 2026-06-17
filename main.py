@@ -2963,7 +2963,7 @@ async def get_appointment_slots(doctor_id: str, date: str):
 
 @app.get("/appointments/online-slots")
 async def get_online_slots(doctor_id: str, date: str):
-    """Return online consultation slots for a given date."""
+    """Return online consultation slots for a given date, with morning/evening sessions."""
     from datetime import datetime as _dt, timedelta as _td, date as _date
     doctor_res = supabase.table("doctors")\
         .select("online_consultation_enabled, online_consultation_hours")\
@@ -2984,15 +2984,6 @@ async def get_online_slots(doctor_id: str, date: str):
         .eq("config_key", "clinic.slot_duration").execute()
     dur = int((cfg_res.data[0]["config_value"] if cfg_res.data else None) or 15)
 
-    slots_list = []
-    sh, sm = map(int, day_entry["start"].split(":"))
-    eh, em = map(int, day_entry["end"].split(":"))
-    cur = _dt(2000, 1, 1, sh, sm)
-    end_t = _dt(2000, 1, 1, eh, em)
-    while cur < end_t:
-        slots_list.append(cur.strftime("%H:%M"))
-        cur += _td(minutes=dur)
-
     booked_res = supabase.table("appointments")\
         .select("appointment_time").eq("doctor_id", doctor_id)\
         .eq("appointment_date", date).eq("consultation_type", "online")\
@@ -3007,21 +2998,41 @@ async def get_online_slots(doctor_id: str, date: str):
         h12 = h % 12 or 12
         return f"{h12}:{m:02d} {'AM' if h < 12 else 'PM'}"
 
+    def gen_session_slots(start_str, end_str, session_label):
+        result = []
+        sh, sm = map(int, start_str.split(":"))
+        eh, em = map(int, end_str.split(":"))
+        cur = _dt(2000, 1, 1, sh, sm)
+        end_t = _dt(2000, 1, 1, eh, em)
+        while cur < end_t:
+            t = cur.strftime("%H:%M")
+            result.append({
+                "time": t,
+                "display": disp(t),
+                "session": session_label,
+                "available": t not in booked_times and not (past_cutoff and t <= past_cutoff),
+                "past": bool(past_cutoff) and t <= past_cutoff,
+            })
+            cur += _td(minutes=dur)
+        return result
+
+    all_slots = []
+    # New format: {day, morning:{enabled,start,end}, evening:{enabled,start,end}}
+    if "morning" in day_entry or "evening" in day_entry:
+        morning = day_entry.get("morning") or {}
+        evening = day_entry.get("evening") or {}
+        if morning.get("enabled"):
+            all_slots += gen_session_slots(morning["start"], morning["end"], "morning")
+        if evening.get("enabled"):
+            all_slots += gen_session_slots(evening["start"], evening["end"], "evening")
+    else:
+        # Legacy format
+        all_slots += gen_session_slots(day_entry["start"], day_entry["end"], "online")
+
     return {
         "enabled": True,
-        "day_has_hours": True,
-        "start": day_entry["start"],
-        "end": day_entry["end"],
-        "slots": [
-            {
-                "time": s,
-                "display": disp(s),
-                "session": "online",
-                "available": s not in booked_times and not (past_cutoff and s <= past_cutoff),
-                "past": bool(past_cutoff) and s <= past_cutoff,
-            }
-            for s in slots_list
-        ],
+        "day_has_hours": bool(all_slots),
+        "slots": all_slots,
     }
 
 

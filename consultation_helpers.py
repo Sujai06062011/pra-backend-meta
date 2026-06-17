@@ -89,9 +89,18 @@ async def is_online_consultation_slot(
         day_name  = date_type.fromisoformat(appointment_date).strftime("%A").lower()
         appt_time = appointment_time[:5]  # "22:00"
 
-        for slot in hours:
-            if slot.get("day", "").lower() == day_name:
-                if slot.get("start", "")[:5] <= appt_time <= slot.get("end", "")[:5]:
+        for entry in hours:
+            if entry.get("day", "").lower() != day_name:
+                continue
+            # New format: {day, morning:{enabled,start,end}, evening:{enabled,start,end}}
+            if "morning" in entry or "evening" in entry:
+                for sess_key in ["morning", "evening"]:
+                    sess = entry.get(sess_key) or {}
+                    if sess.get("enabled") and sess.get("start", "")[:5] <= appt_time <= sess.get("end", "")[:5]:
+                        return True
+            else:
+                # Legacy format: {day, start, end}
+                if entry.get("start", "")[:5] <= appt_time <= entry.get("end", "")[:5]:
                     return True
         return False
     except Exception as e:
