@@ -3286,6 +3286,8 @@ async def list_consultations(
     doctor_id: str = "8c33abe0-5d2e-4613-9437-c7c375e8d162",
     status: str = None,
     date: str = None,
+    date_from: str = None,
+    date_to: str = None,
 ):
     q = supabase.table("consultations") \
         .select("*, patients(name, mobile)") \
@@ -3294,6 +3296,10 @@ async def list_consultations(
 
     if date:
         q = q.gte("scheduled_at", f"{date}T00:00:00+05:30").lte("scheduled_at", f"{date}T23:59:59+05:30")
+    if date_from:
+        q = q.gte("scheduled_at", f"{date_from}T00:00:00+05:30")
+    if date_to:
+        q = q.lte("scheduled_at", f"{date_to}T23:59:59+05:30")
     if status:
         status_list = [s.strip() for s in status.split(",")]
         q = q.in_("status", status_list)
