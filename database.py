@@ -254,13 +254,14 @@ def assign_token_for_slot(doctor_id: str, appointment_date: str, appointment_tim
 
 
 def get_active_appointment(patient_id: str, doctor_id: str, date_str: str):
-    """The patient's existing Confirmed/In Progress appointment on a date, if any.
-    Used to enforce one active appointment per patient per day."""
+    """The patient's existing Confirmed/In Progress IN-CLINIC appointment on a date, if any.
+    Used to enforce one active in-clinic appointment per patient per day.
+    Online consultations are excluded — they don't conflict with clinic slots."""
     result = supabase.table("appointments").select(
         "id, appointment_time, token_number, status"
     ).eq("patient_id", patient_id).eq("doctor_id", doctor_id).eq(
         "appointment_date", date_str
-    ).in_("status", ["Confirmed", "In Progress"]).limit(1).execute()
+    ).in_("status", ["Confirmed", "In Progress"]).neq("consultation_type", "online").limit(1).execute()
     return result.data[0] if result.data else None
 
 
