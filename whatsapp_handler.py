@@ -130,7 +130,7 @@ def parse_date(text: str):
 
 def build_main_menu(patient_name: str, clinic_name: str) -> str:
     return (
-        f"👋 Welcome back to\n🏥 *{clinic_name}*\n\n"
+        f"👋 Welcome to\n🏥 *{clinic_name}*\n\n"
         f"1️⃣ Book Appointment\n"
         f"2️⃣ Queue Status\n"
         f"3️⃣ Cancel Appointment\n"
