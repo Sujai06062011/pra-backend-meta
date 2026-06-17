@@ -2961,6 +2961,70 @@ async def get_appointment_slots(doctor_id: str, date: str):
     }
 
 
+@app.get("/appointments/online-slots")
+async def get_online_slots(doctor_id: str, date: str):
+    """Return online consultation slots for a given date."""
+    from datetime import datetime as _dt, timedelta as _td, date as _date
+    doctor_res = supabase.table("doctors")\
+        .select("online_consultation_enabled, online_consultation_hours")\
+        .eq("id", doctor_id).single().execute()
+    if not doctor_res.data:
+        return {"enabled": False, "slots": []}
+    doc = doctor_res.data
+    if not doc.get("online_consultation_enabled"):
+        return {"enabled": False, "slots": []}
+    hours = doc.get("online_consultation_hours") or []
+    day_name = _date.fromisoformat(date).strftime("%A").lower()
+    day_entry = next((h for h in hours if h.get("day", "").lower() == day_name), None)
+    if not day_entry:
+        return {"enabled": True, "day_has_hours": False, "slots": []}
+
+    cfg_res = supabase.table("clinic_config")\
+        .select("config_value").eq("doctor_id", doctor_id)\
+        .eq("config_key", "clinic.slot_duration").execute()
+    dur = int((cfg_res.data[0]["config_value"] if cfg_res.data else None) or 15)
+
+    slots_list = []
+    sh, sm = map(int, day_entry["start"].split(":"))
+    eh, em = map(int, day_entry["end"].split(":"))
+    cur = _dt(2000, 1, 1, sh, sm)
+    end_t = _dt(2000, 1, 1, eh, em)
+    while cur < end_t:
+        slots_list.append(cur.strftime("%H:%M"))
+        cur += _td(minutes=dur)
+
+    booked_res = supabase.table("appointments")\
+        .select("appointment_time").eq("doctor_id", doctor_id)\
+        .eq("appointment_date", date).eq("consultation_type", "online")\
+        .in_("status", ["Confirmed", "In Progress", "Completed"]).execute()
+    booked_times = {(a["appointment_time"] or "")[:5] for a in (booked_res.data or [])}
+
+    now_ist = datetime.now(IST)
+    past_cutoff = now_ist.strftime("%H:%M") if date == now_ist.date().isoformat() else ""
+
+    def disp(t):
+        h, m = map(int, t.split(":"))
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+    return {
+        "enabled": True,
+        "day_has_hours": True,
+        "start": day_entry["start"],
+        "end": day_entry["end"],
+        "slots": [
+            {
+                "time": s,
+                "display": disp(s),
+                "session": "online",
+                "available": s not in booked_times and not (past_cutoff and s <= past_cutoff),
+                "past": bool(past_cutoff) and s <= past_cutoff,
+            }
+            for s in slots_list
+        ],
+    }
+
+
 @app.get("/appointments/next-token")
 async def get_next_token(doctor_id: str, date: str):
     """Return the next token number for a given date."""
@@ -2980,15 +3044,16 @@ async def book_appointment(request: Request):
     from database import supabase
     import datetime as dt
 
-    body          = await request.json()
-    patient_id    = body["patient_id"]
-    doctor_id     = body["doctor_id"]
-    appt_date     = body["appointment_date"]
-    appt_time     = body.get("appointment_time") or ""
-    visit_type    = body.get("visit_type") or "New Visit"
+    body              = await request.json()
+    patient_id        = body["patient_id"]
+    doctor_id         = body["doctor_id"]
+    appt_date         = body["appointment_date"]
+    appt_time         = body.get("appointment_time") or ""
+    visit_type        = body.get("visit_type") or "New Visit"
+    consultation_type = body.get("consultation_type", "in_clinic")  # "online" | "in_clinic"
 
     # One active appointment per patient per day
-    from database import get_active_appointment
+    from database import get_active_appointment, assign_online_token
     existing = get_active_appointment(patient_id, doctor_id, appt_date)
     if existing:
         ex_time = _time_str(existing.get("appointment_time"))
@@ -3009,12 +3074,22 @@ async def book_appointment(request: Request):
             and _time_str(appt_time) <= now_ist.strftime("%H:%M:%S"):
         raise HTTPException(status_code=400, detail="That time slot has already passed. Please pick a later slot.")
 
-    # Slot must be free (Cancelled rows free the slot)
-    if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
-        raise HTTPException(status_code=400, detail="Slot already booked")
-
-    # Token is always server-assigned — never taken from the request body
-    token = assign_token_for_slot(doctor_id, appt_date, appt_time)
+    if consultation_type == "online":
+        # Online: check only online appointments for this slot
+        ob = supabase.table("appointments").select("id")\
+            .eq("doctor_id", doctor_id).eq("appointment_date", appt_date)\
+            .eq("appointment_time", _time_str(appt_time)).eq("consultation_type", "online")\
+            .in_("status", ["Confirmed", "In Progress", "Completed"]).execute()
+        if ob.data:
+            raise HTTPException(status_code=400, detail="That online slot is already booked")
+        token = assign_online_token(doctor_id, appt_date)
+        display_tok = f"O{token}"
+    else:
+        # Slot must be free (Cancelled rows free the slot)
+        if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
+            raise HTTPException(status_code=400, detail="Slot already booked")
+        token = assign_token_for_slot(doctor_id, appt_date, appt_time)
+        display_tok = get_display_token(token, appt_time)
 
     from database import create_appointment as db_create_appointment
     appt = db_create_appointment(patient_id, doctor_id, appt_date, appt_time,
@@ -3024,8 +3099,10 @@ async def book_appointment(request: Request):
     appt_id = appt["id"]
     token = appt.get("token_number") or token
 
-    # Display token (M1/E1…) for messages and response — fixed per slot
-    display_tok = get_display_token(token, appt_time)
+    # Update consultation_type on the appointment
+    if consultation_type == "online":
+        supabase.table("appointments").update({"consultation_type": "online"})\
+            .eq("id", appt_id).execute()
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()
@@ -3056,7 +3133,28 @@ async def book_appointment(request: Request):
 
     time_display = fmt_time(appt_time)
 
-    if language == "tamil":
+    if consultation_type == "online":
+        if language == "tamil":
+            msg = (
+                f"✅ ஆன்லைன் சந்திப்பு உறுதிப்படுத்தப்பட்டது! 🎥\n\n"
+                f"🏥 Dr. Kumar Child Care Clinic\n"
+                f"👤 {pat_name} ({pat_code})\n"
+                f"📅 {date_display}\n"
+                f"⏰ {time_display} | Token {display_tok}\n\n"
+                f"Video link தனியாக அனுப்பப்படும்.\n"
+                f"ரத்து செய்ய CANCEL என்று reply பண்ணுங்கள்."
+            )
+        else:
+            msg = (
+                f"✅ Online Consultation Confirmed! 🎥\n\n"
+                f"🏥 Dr. Kumar Child Care Clinic\n"
+                f"👤 {pat_name} ({pat_code})\n"
+                f"📅 {date_display}\n"
+                f"⏰ {time_display} | Token {display_tok}\n\n"
+                f"Your video join link will be sent shortly.\n"
+                f"Reply CANCEL to cancel."
+            )
+    elif language == "tamil":
         msg = (
             f"✅ சந்திப்பு உறுதிப்படுத்தப்பட்டது!\n\n"
             f"🏥 Dr. Kumar Child Care Clinic\n"
@@ -3087,15 +3185,9 @@ async def book_appointment(request: Request):
         except Exception as e:
             print(f"❌ WhatsApp booking confirmation failed: {e}")
 
-    # ── Online consultation: auto-create video room if slot qualifies ──────────
-    try:
-        is_online = await is_online_consultation_slot(
-            supabase=supabase,
-            doctor_id=doctor_id,
-            appointment_date=appt_date,
-            appointment_time=appt_time,
-        )
-        if is_online:
+    # ── Online consultation: auto-create video room ───────────────────────────
+    if consultation_type == "online":
+        try:
             consultation = await create_consultation_for_appointment(
                 supabase=supabase,
                 appointment_id=appt_id,
@@ -3114,16 +3206,17 @@ async def book_appointment(request: Request):
                     language=language,
                 )
                 print(f"[Online Consultation] Video link sent to {pat_mob}")
-    except Exception as e:
-        print(f"[Online consultation auto-create error] {e}")
+        except Exception as e:
+            print(f"[Online consultation auto-create error] {e}")
     # ── End online consultation block ────────────────────────────────────────
 
     return {
-        "appointment_id": appt_id,
-        "token_number":   token,
-        "display_token":  display_tok,
-        "patient_name":   pat_name,
-        "whatsapp_sent":  wa_sent,
+        "appointment_id":    appt_id,
+        "token_number":      token,
+        "display_token":     display_tok,
+        "consultation_type": consultation_type,
+        "patient_name":      pat_name,
+        "whatsapp_sent":     wa_sent,
     }
 
 

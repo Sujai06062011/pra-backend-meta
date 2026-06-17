@@ -12,23 +12,24 @@ supabase: Client = create_client(
 
 def get_doctor_by_whatsapp(whatsapp_number: str):
     """Get doctor by WhatsApp number - handles both +14155238886 and 14155238886"""
-    # Normalize: remove + for consistent lookup
     clean = whatsapp_number.replace('+', '')
-    
-    # Try without + first (most common storage format)
-    result = supabase.table("doctors").select(
-        "id, name, clinic_name, clinic_timings, clinic_address, mobile"
-    ).eq("whatsapp_number", clean).execute()
-    
+    _fields = "id, name, clinic_name, clinic_timings, clinic_address, mobile, online_consultation_enabled, online_consultation_hours"
+    result = supabase.table("doctors").select(_fields).eq("whatsapp_number", clean).execute()
     if result.data:
         return result.data[0]
-    
-    # Try with + (some may be stored with +)
-    result = supabase.table("doctors").select(
-        "id, name, clinic_name, clinic_timings, clinic_address, mobile"
-    ).eq("whatsapp_number", whatsapp_number).execute()
-    
+    result = supabase.table("doctors").select(_fields).eq("whatsapp_number", whatsapp_number).execute()
     return result.data[0] if result.data else None
+
+
+def assign_online_token(doctor_id: str, appointment_date: str) -> int:
+    """Return next O-token number for online appointments on a given date."""
+    res = supabase.table("appointments").select("id")\
+        .eq("doctor_id", doctor_id)\
+        .eq("appointment_date", appointment_date)\
+        .eq("consultation_type", "online")\
+        .neq("status", "Cancelled")\
+        .execute()
+    return len(res.data or []) + 1
 
 
 def get_patient_by_mobile(mobile: str):
