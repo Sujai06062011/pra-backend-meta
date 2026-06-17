@@ -735,18 +735,17 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         try:
             _dob_text = raw_dob.strip()
             dob_date  = None
-            # Try numeric formats: DD/MM/YYYY or DD-MM-YYYY
-            for sep in ["/", "-"]:
-                if sep in _dob_text:
-                    _parts = _dob_text.split(sep)
-                    if len(_parts) == 3 and len(_parts[2]) == 4:
-                        day, mon, yr = _parts
-                        dob_date = date(int(yr), int(mon), int(day))
-                        break
-            # Try "15 Jun 1990" or "15 June 1990" format
+            import re as _re
+            # Try numeric formats: DD/MM/YYYY, DD-MM-YYYY, or DD MM YYYY
+            _nm = _re.match(r"^(\d{1,2})[/\-\s](\d{1,2})[/\-\s](\d{4})$", _dob_text)
+            if _nm:
+                try:
+                    dob_date = date(int(_nm.group(3)), int(_nm.group(2)), int(_nm.group(1)))
+                except (ValueError, IndexError):
+                    pass
+            # Try "15 Jun 1990", "15 June 1990", or "15-Jun-1990" format
             if not dob_date:
-                import re as _re
-                _dm = _re.search(r"(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})", _dob_text)
+                _dm = _re.search(r"(\d{1,2})[\s\-/]+([a-zA-Z]+)[\s\-/]+(\d{4})", _dob_text)
                 if _dm:
                     _d, _m_name, _yr = _dm.group(1), _dm.group(2).lower()[:3], _dm.group(3)
                     _m_num = MONTHS.get(_m_name)

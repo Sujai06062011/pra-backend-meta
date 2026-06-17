@@ -429,13 +429,38 @@ def create_patient(mobile: str, name: str, dob: str, gender: str,
     birth_year = "0000"
 
     try:
-        dob_date = datetime.strptime(dob, "%d %B %Y").date()
-        today = date.today()
-        age = today.year - dob_date.year - (
-            (today.month, today.day) < (dob_date.month, dob_date.day)
-        )
-        dob_iso = dob_date.isoformat()
-        birth_year = str(dob_date.year)
+        import re as _re
+        _dob = dob.strip()
+        dob_date = None
+        _MONTHS = {
+            "jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06",
+            "jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12",
+            "january":"01","february":"02","march":"03","april":"04","june":"06",
+            "july":"07","august":"08","september":"09","october":"10",
+            "november":"11","december":"12",
+        }
+        # DD/MM/YYYY, DD-MM-YYYY, or DD MM YYYY
+        _nm = _re.match(r"^(\d{1,2})[/\-\s](\d{1,2})[/\-\s](\d{4})$", _dob)
+        if _nm:
+            try:
+                dob_date = date(int(_nm.group(3)), int(_nm.group(2)), int(_nm.group(1)))
+            except (ValueError, IndexError):
+                pass
+        # "15 Jun 1990", "15 June 1990", "15-Jun-1990"
+        if not dob_date:
+            _dm = _re.search(r"(\d{1,2})[\s\-/]+([a-zA-Z]+)[\s\-/]+(\d{4})", _dob)
+            if _dm:
+                _d, _mn, _yr = _dm.group(1), _dm.group(2).lower()[:3], _dm.group(3)
+                _mnum = _MONTHS.get(_mn)
+                if _mnum:
+                    dob_date = date(int(_yr), int(_mnum), int(_d))
+        if dob_date:
+            today = date.today()
+            age = today.year - dob_date.year - (
+                (today.month, today.day) < (dob_date.month, dob_date.day)
+            )
+            dob_iso = dob_date.isoformat()
+            birth_year = str(dob_date.year)
     except Exception:
         pass
 
