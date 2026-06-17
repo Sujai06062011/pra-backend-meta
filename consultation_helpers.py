@@ -44,6 +44,44 @@ def get_patient_join_url(room_id: str) -> str:
 
 # ── WhatsApp sender (standalone, no circular import) ──────────────────────────
 
+async def send_meta_list(
+    to_number: str,
+    body_text: str,
+    button_label: str,
+    sections: list,
+    header_text: str = None,
+    footer_text: str = None,
+) -> dict:
+    """Send a WhatsApp interactive LIST message via Meta API."""
+    url = (
+        f"https://graph.facebook.com/{META_API_VERSION}"
+        f"/{META_PHONE_NUMBER_ID}/messages"
+    )
+    interactive = {
+        "type": "list",
+        "body": {"text": body_text},
+        "action": {"button": button_label, "sections": sections},
+    }
+    if header_text:
+        interactive["header"] = {"type": "text", "text": header_text}
+    if footer_text:
+        interactive["footer"] = {"text": footer_text}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "interactive",
+        "interactive": interactive,
+    }
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=payload, headers=headers)
+        print(f"[Meta LIST] to={to_number} status={r.status_code} body={r.text[:200]}")
+        return r.json()
+
+
 async def send_whatsapp_text(to_number: str, message: str):
     headers = {
         "Authorization": f"Bearer {META_ACCESS_TOKEN}",
@@ -219,7 +257,7 @@ async def send_video_link_to_patient(
             f"{room_url}\n\n"
             f"✅ No download needed\n"
             f"✅ No login required\n"
-            f"Just click the link at appointment time!"
+            f"✅ Just click the link at appointment time!"
         )
 
     await send_whatsapp_text(mobile, msg)
