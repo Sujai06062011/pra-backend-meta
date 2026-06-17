@@ -254,6 +254,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "dob_provided"
     elif current_state == "awaiting_gender":
         intent = "gender_provided"
+    elif current_state == "awaiting_language":
+        intent = "language_provided"
     elif current_state == "awaiting_booking_patient_select":
         intent = "booking_patient_selected"
     elif current_state == "awaiting_new_member_name":
@@ -324,13 +326,29 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     elif intent == "gender_provided":
         gender = "Male" if t.startswith("m") else "Female"
+        reply = (
+            "What language do you prefer?\n\n"
+            "1. Tamil\n"
+            "2. English\n"
+            "3. Hindi"
+        )
+        new_state = "awaiting_language"
+        new_temp  = {**temp_data, "gender": gender}
+
+    elif intent == "language_provided":
+        lang_map = {"1": "tamil", "2": "english", "3": "hindi",
+                    "tamil": "tamil", "english": "english", "hindi": "hindi"}
+        language = lang_map.get(t, "english")
         name   = temp_data.get("name", "")
         dob    = temp_data.get("dob", "")
+        gender = temp_data.get("gender", "")
         new_patient = create_patient(from_number, name, dob, gender,
-                                     family_head_mobile=from_number)
-        patient_id = new_patient["id"] if new_patient else ""
+                                     family_head_mobile=from_number,
+                                     language=language)
+        patient_code = new_patient.get("patient_code", "") if new_patient else ""
+        patient_id   = new_patient["id"] if new_patient else ""
         reply = (
-            f"You are now registered at {clinic_name}! Welcome {name}! 🎉\n\n"
+            f"You are now registered with patient code *{patient_code}* at {clinic_name}! Welcome {name}! 🎉\n\n"
             + build_main_menu(name, clinic_name)
         )
         new_state = "idle"

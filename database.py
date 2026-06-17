@@ -407,7 +407,7 @@ def cancel_appointment(appointment_id: str):
 
 
 def create_patient(mobile: str, name: str, dob: str, gender: str,
-                   family_head_mobile: str = None):
+                   family_head_mobile: str = None, language: str = "english"):
     """Create a new patient with auto-calculated age and patient_code"""
     from datetime import date, datetime
 
@@ -443,6 +443,7 @@ def create_patient(mobile: str, name: str, dob: str, gender: str,
         "gender": gender,
         "patient_code": patient_code,
         "family_head_mobile": fhm,
+        "language": language,
         "registration_source": "whatsapp"
     }).execute()
     return result.data[0] if result.data else None
