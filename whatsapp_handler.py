@@ -5,6 +5,7 @@ from consultation_helpers import (
     create_consultation_for_appointment,
     send_video_link_to_patient,
     send_meta_list,
+    send_meta_buttons,
     send_whatsapp_text,
 )
 from database import (
@@ -222,6 +223,82 @@ def build_patient_select_msg(patients: list) -> str:
 
 
 
+def _member_age(member: dict) -> int:
+    dob = member.get("date_of_birth", "")
+    if not dob:
+        return member.get("age") or 0
+    try:
+        from datetime import date as _date
+        dob_date = _date.fromisoformat(str(dob)[:10])
+        today = _date.today()
+        return today.year - dob_date.year - (
+            (today.month, today.day) < (dob_date.month, dob_date.day)
+        )
+    except Exception:
+        return member.get("age") or 0
+
+
+def format_member_button_title(member: dict) -> str:
+    first_name = member.get("name", "").split()[0]
+    age = _member_age(member)
+    gender = member.get("gender", "")
+    gender_short = "M" if gender == "Male" else "F" if gender == "Female" else ""
+    return f"{first_name} {age}{gender_short}".strip()[:20]
+
+
+def format_member_list_description(member: dict) -> str:
+    age = _member_age(member)
+    code = member.get("patient_code", "")
+    desc = f"{age} yrs · {code}" if age > 0 else code
+    return desc[:72]
+
+
+async def send_patient_select_interactive(from_number: str, all_patients: list):
+    """Send patient selection as interactive buttons (≤2 members) or list (3-9) or plain text (10+)."""
+    total_options = len(all_patients) + 1  # +1 for "Add new member"
+
+    if total_options <= 3:
+        buttons = [
+            {"id": f"member_{p['id']}", "title": format_member_button_title(p)}
+            for p in all_patients
+        ]
+        buttons.append({"id": "member_new", "title": "Add new member"})
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="📅 Book Appointment\n\nWho is this appointment for?",
+            buttons=buttons,
+            footer_text="Reply MENU for main menu",
+        )
+
+    elif total_options <= 10:
+        rows = [
+            {
+                "id": f"member_{p['id']}",
+                "title": p.get("name", "")[:24],
+                "description": format_member_list_description(p),
+            }
+            for p in all_patients
+        ]
+        rows.append({
+            "id": "member_new",
+            "title": "Add new family member",
+            "description": "Register a new patient",
+        })
+        await send_meta_list(
+            to_number=from_number,
+            body_text="📅 Book Appointment\n\nWho is this appointment for?",
+            button_label="Select patient",
+            sections=[{"title": "Family members", "rows": rows}],
+            footer_text="Reply MENU for main menu",
+        )
+
+    else:
+        # 10+ members — plain text fallback
+        return build_patient_select_msg(all_patients)
+
+    return None  # message already sent interactively
+
+
 async def handle_message(from_number: str, text: str, to_number: str, media_url: str = ""):
     text = text.strip()
     t = text.lower().strip()
@@ -401,7 +478,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── BOOK APPOINTMENT — unified flow ───────────────────────
     elif intent == "book":
         all_patients = get_all_linked_patients(from_number)
-        reply     = build_patient_select_msg(all_patients)
+        fallback_text = await send_patient_select_interactive(from_number, all_patients)
+        reply     = fallback_text or ""
         new_state = "awaiting_booking_patient_select"
         new_temp  = {"booking_patients": all_patients}
 

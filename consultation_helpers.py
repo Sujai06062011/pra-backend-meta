@@ -82,6 +82,50 @@ async def send_meta_list(
         return r.json()
 
 
+async def send_meta_buttons(
+    to_number: str,
+    body_text: str,
+    buttons: list,
+    header_text: str = None,
+    footer_text: str = None,
+) -> dict:
+    """Send a WhatsApp interactive reply-buttons message via Meta API.
+    buttons: list of {"id": str, "title": str} (max 3, title max 20 chars)
+    """
+    url = (
+        f"https://graph.facebook.com/{META_API_VERSION}"
+        f"/{META_PHONE_NUMBER_ID}/messages"
+    )
+    interactive = {
+        "type": "button",
+        "body": {"text": body_text},
+        "action": {
+            "buttons": [
+                {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
+                for b in buttons
+            ]
+        },
+    }
+    if header_text:
+        interactive["header"] = {"type": "text", "text": header_text}
+    if footer_text:
+        interactive["footer"] = {"text": footer_text}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "interactive",
+        "interactive": interactive,
+    }
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=payload, headers=headers)
+        print(f"[Meta BUTTONS] to={to_number} status={r.status_code} body={r.text[:200]}")
+        return r.json()
+
+
 async def send_whatsapp_text(to_number: str, message: str):
     headers = {
         "Authorization": f"Bearer {META_ACCESS_TOKEN}",
