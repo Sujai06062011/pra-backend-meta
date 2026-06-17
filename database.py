@@ -321,6 +321,25 @@ def create_appointment(patient_id: str, doctor_id: str, date_str: str,
     return result.data[0] if result.data else None
 
 
+def create_online_appointment(patient_id: str, doctor_id: str, date_str: str,
+                              time_str: str, booking_source: str = "whatsapp"):
+    """Create an online consultation appointment. token_number is NULL to avoid
+    the unique_token_per_doctor_date constraint (O-tokens are computed at display time)."""
+    t = _time_str(time_str)
+    result = supabase.table("appointments").insert({
+        "patient_id": patient_id,
+        "doctor_id": doctor_id,
+        "appointment_date": date_str,
+        "appointment_time": t,
+        "token_number": None,
+        "consultation_type": "online",
+        "status": "Confirmed",
+        "booking_source": booking_source,
+    }).execute()
+    ensure_queue_session(doctor_id, date_str)
+    return result.data[0] if result.data else None
+
+
 def get_upcoming_appointments(patient_id: str, doctor_id: str):
     """Get upcoming appointments for a single patient (legacy)"""
     from datetime import date

@@ -3102,18 +3102,16 @@ async def book_appointment(request: Request):
         token = assign_token_for_slot(doctor_id, appt_date, appt_time)
         display_tok = get_display_token(token, appt_time)
 
-    from database import create_appointment as db_create_appointment
-    appt = db_create_appointment(patient_id, doctor_id, appt_date, appt_time,
-                                 token, booking_source="frontend")
+    from database import create_appointment as db_create_appointment, create_online_appointment as db_create_online_appointment
+    if consultation_type == "online":
+        appt = db_create_online_appointment(patient_id, doctor_id, appt_date, appt_time, booking_source="frontend")
+    else:
+        appt = db_create_appointment(patient_id, doctor_id, appt_date, appt_time,
+                                     token, booking_source="frontend")
     if not appt:
         raise HTTPException(status_code=500, detail="Appointment insert failed")
     appt_id = appt["id"]
     token = appt.get("token_number") or token
-
-    # Update consultation_type on the appointment
-    if consultation_type == "online":
-        supabase.table("appointments").update({"consultation_type": "online"})\
-            .eq("id", appt_id).execute()
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()

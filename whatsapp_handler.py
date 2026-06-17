@@ -8,7 +8,7 @@ from consultation_helpers import (
 from database import (
     get_doctor_by_whatsapp, get_patient_by_mobile, get_conversation_state,
     save_conversation_state, get_queue_status, get_patient_token_today, get_family_tokens_today,
-    check_holiday, get_booked_slots, get_next_token, create_appointment,
+    check_holiday, get_booked_slots, get_next_token, create_appointment, create_online_appointment,
     get_upcoming_appointments, get_family_upcoming_appointments, cancel_appointment, create_patient,
     get_display_token, assign_token_for_slot, assign_online_token, is_slot_available, _time_str,
     get_slot_config, get_active_appointment,
@@ -747,11 +747,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     new_state = "idle"
                 else:
                     token = assign_online_token(doctor_id, parsed_date)
-                    appt_row = create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+                    appt_row = create_online_appointment(booking_for, doctor_id, parsed_date, selected_slot)
                     appt_id  = appt_row["id"] if appt_row else None
-                    if appt_id:
-                        _supa.table("appointments").update({"consultation_type": "online"})\
-                            .eq("id", appt_id).execute()
                     display_tok = f"O{token}"
 
                     try:
