@@ -77,7 +77,7 @@ def get_patient_token_today(patient_id: str, doctor_id: str):
         "token_number, appointment_time"
     ).eq("patient_id", patient_id).eq("doctor_id", doctor_id).eq(
         "appointment_date", today
-    ).eq("status", "Confirmed").execute()
+    ).eq("status", "Confirmed").neq("consultation_type", "online").execute()
     return result.data[0] if result.data else None
 
 
@@ -103,7 +103,7 @@ def get_family_tokens_today(mobile: str, doctor_id: str, in_progress_token: int)
         "patient_id, token_number"
     ).eq("doctor_id", doctor_id).eq("appointment_date", today).eq(
         "status", "Confirmed"
-    ).in_("patient_id", list(all_patients.keys())).order("token_number").execute()
+    ).neq("consultation_type", "online").in_("patient_id", list(all_patients.keys())).order("token_number").execute()
 
     tokens = []
     for a in (appts.data or []):

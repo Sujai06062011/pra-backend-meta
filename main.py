@@ -1120,7 +1120,7 @@ async def dashboard_stats(doctor_id: str):
     from database import supabase
     today = datetime.now(IST).date().isoformat()
 
-    today_appts = supabase.table("appointments").select("id", count="exact").eq("doctor_id", doctor_id).eq("appointment_date", today).neq("status", "Cancelled").execute()
+    today_appts = supabase.table("appointments").select("id", count="exact").eq("doctor_id", doctor_id).eq("appointment_date", today).neq("status", "Cancelled").neq("consultation_type", "online").execute()
     # tokens uses queue_date, not appointment_date
     token_row = supabase.table("tokens").select("current_token").eq("doctor_id", doctor_id).eq("queue_date", today).execute()
     # patients table has no doctor_id — single-clinic deployment, count all patients
@@ -1134,7 +1134,7 @@ async def dashboard_stats(doctor_id: str):
     # same rule as /queue/status (current_token alone resets to 0 at day end)
     day_rows = supabase.table("appointments").select(
         "token_number, appointment_time, status"
-    ).eq("doctor_id", doctor_id).eq("appointment_date", today).execute().data or []
+    ).eq("doctor_id", doctor_id).eq("appointment_date", today).neq("consultation_type", "online").execute().data or []
 
     curr = next((a for a in day_rows if current_token_val and a.get("token_number") == current_token_val), None)
     serving_time = _time_str(curr.get("appointment_time")) if curr else ""
@@ -1541,14 +1541,14 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
 async def today_appointments(doctor_id: str):
     from database import supabase
     today = datetime.now(IST).date().isoformat()
-    result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).order("appointment_time", desc=False).execute()
+    result = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", today).neq("consultation_type", "online").order("appointment_time", desc=False).execute()
     return _annotate_display_tokens(result.data or [], doctor_id)
 
 
 @app.get("/appointments")
 async def list_appointments(doctor_id: str, date: str = "", date_from: str = "", date_to: str = "", patient_id: str = ""):
     from database import supabase
-    q = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id)
+    q = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).neq("consultation_type", "online")
     if patient_id:
         q = q.eq("patient_id", patient_id)
     if date:
@@ -1764,7 +1764,7 @@ async def queue_status(doctor_id: str, date: str = ""):
     token_row = supabase.table("tokens").select("current_token").eq("doctor_id", doctor_id).eq("queue_date", d).execute()
     current = token_row.data[0]["current_token"] if token_row.data else 0
 
-    appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).order("appointment_time", desc=False).execute()
+    appts = supabase.table("appointments").select("*, patients(*)").eq("doctor_id", doctor_id).eq("appointment_date", d).neq("consultation_type", "online").order("appointment_time", desc=False).execute()
     all_appts = appts.data or []
 
     # Self-heal stale queue session: if the token being served no longer exists
