@@ -256,6 +256,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "gender_provided"
     elif current_state == "awaiting_language":
         intent = "language_provided"
+    elif current_state == "awaiting_city":
+        intent = "city_provided"
     elif current_state == "awaiting_booking_patient_select":
         intent = "booking_patient_selected"
     elif current_state == "awaiting_new_member_name":
@@ -266,6 +268,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "new_member_gender_provided"
     elif current_state == "awaiting_new_member_language":
         intent = "new_member_language_provided"
+    elif current_state == "awaiting_new_member_city":
+        intent = "new_member_city_provided"
     elif current_state == "awaiting_booking_date":
         intent = "date_provided"
     elif current_state == "awaiting_date":
@@ -339,12 +343,20 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         lang_map = {"1": "tamil", "2": "english", "3": "hindi",
                     "tamil": "tamil", "english": "english", "hindi": "hindi"}
         language = lang_map.get(t, "english")
-        name   = temp_data.get("name", "")
-        dob    = temp_data.get("dob", "")
-        gender = temp_data.get("gender", "")
+        reply = "Which city are you from?\n\nExample: Chennai"
+        new_state = "awaiting_city"
+        new_temp  = {**temp_data, "language": language}
+
+    elif intent == "city_provided":
+        city     = text.strip()
+        name     = temp_data.get("name", "")
+        dob      = temp_data.get("dob", "")
+        gender   = temp_data.get("gender", "")
+        language = temp_data.get("language", "english")
         new_patient = create_patient(from_number, name, dob, gender,
                                      family_head_mobile=from_number,
-                                     language=language)
+                                     language=language, city=city,
+                                     doctor_id=doctor["id"] if doctor else "")
         patient_code = new_patient.get("patient_code", "") if new_patient else ""
         patient_id   = new_patient["id"] if new_patient else ""
         reply = (
@@ -427,10 +439,16 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         lang_map = {"1": "tamil", "2": "english", "3": "hindi",
                     "tamil": "tamil", "english": "english", "hindi": "hindi"}
         language = lang_map.get(t, "english")
+        reply = "Which city are they from?\n\nExample: Chennai"
+        new_state = "awaiting_new_member_city"
+        new_temp  = {**temp_data, "new_language": language}
 
+    elif intent == "new_member_city_provided":
+        city       = text.strip()
         raw_name   = temp_data.get("new_name", "")
-        raw_dob    = temp_data.get("new_dob", "")   # DD/MM/YYYY
+        raw_dob    = temp_data.get("new_dob", "")
         raw_gender = temp_data.get("new_gender", "Male")
+        language   = temp_data.get("new_language", "english")
         gender_clean = "Male" if raw_gender.lower().startswith("m") else (
                         "Female" if raw_gender.lower().startswith("f") else "Other")
 
@@ -453,14 +471,14 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         except Exception as _e:
             print(f"⚠️ DOB parse error: {_e}")
 
-        # Generate patient_code
+        from database import _next_patient_counter
+        doctor_id_val = doctor["id"] if doctor else ""
         name_part  = raw_name[:3].upper().replace(" ", "")
-        mobile_sfx = from_number[-4:]
-        patient_code = f"{name_part}-{mobile_sfx}-{birth_year}"
+        counter    = _next_patient_counter(doctor_id_val) if doctor_id_val else 1
+        patient_code = f"{name_part}-{birth_year}-{counter}"
 
-        # Insert patient
         try:
-            ins = _supa.table("patients").insert({
+            ins_row = {
                 "mobile": from_number,
                 "whatsapp_number": from_number,
                 "name": raw_name,
@@ -468,21 +486,20 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 "age": age,
                 "gender": gender_clean,
                 "language": language,
+                "city": city,
                 "patient_code": patient_code,
                 "family_head_mobile": from_number,
                 "registration_source": "whatsapp",
-            }).execute()
+            }
+            if doctor_id_val:
+                ins_row["doctor_id"] = doctor_id_val
+            ins = _supa.table("patients").insert(ins_row).execute()
             new_pid = ins.data[0]["id"] if ins.data else ""
         except Exception as _e:
             print(f"❌ Family member insert error: {_e}")
             new_pid = ""
 
-        today     = date.today()
-        tomorrow  = date.fromordinal(today.toordinal() + 1)
-        day_after = date.fromordinal(today.toordinal() + 2)
-        fmt = "%d %B %Y"
         age_str = f"{age} yrs" if age is not None else "unknown"
-
         reg_msg = (
             f"✅ Family member registered!\n\n"
             f"👤 {raw_name}\n"

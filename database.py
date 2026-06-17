@@ -406,9 +406,17 @@ def cancel_appointment(appointment_id: str):
     }).eq("id", appointment_id).execute()
 
 
+def _next_patient_counter(doctor_id: str) -> int:
+    """Return next sequential patient number for this clinic."""
+    res = supabase.table("patients").select("id", count="exact")\
+        .eq("doctor_id", doctor_id).execute()
+    return (res.count or 0) + 1
+
+
 def create_patient(mobile: str, name: str, dob: str, gender: str,
-                   family_head_mobile: str = None, language: str = "english"):
-    """Create a new patient with auto-calculated age and patient_code"""
+                   family_head_mobile: str = None, language: str = "english",
+                   city: str = "", doctor_id: str = ""):
+    """Create a new patient with auto-calculated age and patient_code (NAME3-YEAR-COUNTER)."""
     from datetime import date, datetime
 
     age = None
@@ -426,15 +434,13 @@ def create_patient(mobile: str, name: str, dob: str, gender: str,
     except Exception:
         pass
 
-    # Generate patient code: first 3 letters + last 4 of mobile + birth year
-    name_part = name[:3].upper()
-    mobile_part = mobile[-4:]
-    patient_code = f"{name_part}-{mobile_part}-{birth_year}"
+    name_part = name[:3].upper().replace(" ", "")
+    counter = _next_patient_counter(doctor_id) if doctor_id else 1
+    patient_code = f"{name_part}-{birth_year}-{counter}"
 
-    # family_head_mobile defaults to own mobile if not provided
     fhm = family_head_mobile if family_head_mobile else mobile
 
-    result = supabase.table("patients").insert({
+    row = {
         "mobile": mobile,
         "whatsapp_number": mobile,
         "name": name,
@@ -444,8 +450,13 @@ def create_patient(mobile: str, name: str, dob: str, gender: str,
         "patient_code": patient_code,
         "family_head_mobile": fhm,
         "language": language,
-        "registration_source": "whatsapp"
-    }).execute()
+        "city": city,
+        "registration_source": "whatsapp",
+    }
+    if doctor_id:
+        row["doctor_id"] = doctor_id
+
+    result = supabase.table("patients").insert(row).execute()
     return result.data[0] if result.data else None
 
 def get_patient_by_mobile(mobile: str):
