@@ -191,20 +191,6 @@ def build_patient_select_msg(patients: list) -> str:
     return lines
 
 
-def build_date_options() -> str:
-    today     = date.today()
-    tomorrow  = date(today.year, today.month, today.day + 1) if today.day < 28 else date.fromordinal(today.toordinal() + 1)
-    day_after = date.fromordinal(today.toordinal() + 2)
-    fmt = "%d %B %Y"
-    return (
-        f"Which date?\n\n"
-        f"1. Today ({today.strftime(fmt)})\n"
-        f"2. Tomorrow ({tomorrow.strftime(fmt)})\n"
-        f"3. Day after ({day_after.strftime(fmt)})\n"
-        f"4. Other date (reply with date e.g. 15 June 2026)\n"
-        + MENU_HINT
-    )
-
 
 async def handle_message(from_number: str, text: str, to_number: str, media_url: str = ""):
     text = text.strip()
