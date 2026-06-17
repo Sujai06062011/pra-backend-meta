@@ -214,7 +214,7 @@ def generate_slots_for_date(doctor_id: str, date_str: str) -> list[dict]:
     """
     av = get_availability_for_date(doctor_id, date_str)
     cfg = get_full_clinic_config(doctor_id)
-    dur = cfg["duration"]
+    dur = av.get("slot_duration_minutes") or cfg["duration"]
 
     if av["is_holiday"]:
         return []
