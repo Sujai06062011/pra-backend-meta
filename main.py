@@ -3463,6 +3463,26 @@ async def complete_consultation(consultation_id: str, request: Request):
     return {"success": True, "duration_minutes": duration_minutes}
 
 
+@app.patch("/consultations/{consultation_id}/cancel")
+async def cancel_consultation(consultation_id: str):
+    from database import supabase
+    c_res = supabase.table("consultations").select("appointment_id").eq("id", consultation_id).single().execute()
+    supabase.table("consultations").update({"status": "cancelled"}).eq("id", consultation_id).execute()
+    if c_res.data and c_res.data.get("appointment_id"):
+        supabase.table("appointments").update({"status": "Cancelled"}).eq("id", c_res.data["appointment_id"]).execute()
+    return {"success": True}
+
+
+@app.patch("/consultations/{consultation_id}/no-show")
+async def no_show_consultation(consultation_id: str):
+    from database import supabase
+    c_res = supabase.table("consultations").select("appointment_id").eq("id", consultation_id).single().execute()
+    supabase.table("consultations").update({"status": "missed"}).eq("id", consultation_id).execute()
+    if c_res.data and c_res.data.get("appointment_id"):
+        supabase.table("appointments").update({"status": "No Show"}).eq("id", c_res.data["appointment_id"]).execute()
+    return {"success": True}
+
+
 @app.patch("/doctors/{doctor_id}/online-settings")
 async def update_online_settings(doctor_id: str, request: Request):
     body = await request.json()

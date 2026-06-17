@@ -400,10 +400,14 @@ def get_family_upcoming_appointments(mobile: str, doctor_id: str):
 
 
 def cancel_appointment(appointment_id: str):
-    """Cancel an appointment"""
+    """Cancel an appointment and its linked online consultation if any."""
     supabase.table("appointments").update({
         "status": "Cancelled"
     }).eq("id", appointment_id).execute()
+    # Cancel linked consultation (online bookings auto-create a consultations row)
+    supabase.table("consultations").update({
+        "status": "cancelled"
+    }).eq("appointment_id", appointment_id).in_("status", ["scheduled", "waiting"]).execute()
 
 
 def _next_patient_counter(doctor_id: str) -> int:
