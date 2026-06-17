@@ -515,7 +515,31 @@ async def meta_webhook_inbound(request: Request):
                     action = parts[0]
                     followup_id = parts[1] if len(parts) > 1 else None
 
-                    if button_id.startswith("date_"):
+                    if button_id in ("gender_male", "gender_female", "gender_other"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state not in ("awaiting_gender", "awaiting_new_member_gender"):
+                            print(f"[STALE] gender button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your session has moved on. Reply MENU to start over.")
+                        else:
+                            gender_map = {
+                                "gender_male": "Male", "gender_female": "Female", "gender_other": "Other"
+                            }
+                            await handle_inbound_message(from_number, gender_map[button_id], clinic_number)
+
+                    elif button_id in ("lang_tamil", "lang_english", "lang_hindi"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state not in ("awaiting_language", "awaiting_new_member_language"):
+                            print(f"[STALE] lang button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your session has moved on. Reply MENU to start over.")
+                        else:
+                            lang_map = {
+                                "lang_tamil": "Tamil", "lang_english": "English", "lang_hindi": "Hindi"
+                            }
+                            await handle_inbound_message(from_number, lang_map[button_id], clinic_number)
+
+                    elif button_id.startswith("date_"):
                         current_state, _ = get_conversation_state(from_number)
                         if current_state != "awaiting_booking_date":
                             print(f"[STALE] date button ignored, state={current_state}")

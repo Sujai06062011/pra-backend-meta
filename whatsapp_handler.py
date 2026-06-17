@@ -563,22 +563,38 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── REGISTRATION FLOW ─────────────────────────────────────
     elif intent == "name_provided":
-        reply = f"Thank you {text}! 😊\n\nPlease share your Date of Birth.\n\nExample: 14 May 1982"
+        reply = f"Thank you {text}! 😊\n\nPlease share your Date of Birth.\n\n(e.g. 15 Jun 1990)"
         new_state = "awaiting_dob"
         new_temp  = {"name": text}
 
     elif intent == "dob_provided":
-        reply = "Got it! Please share your Gender.\n\nReply M for Male or F for Female."
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="What is your gender?",
+            buttons=[
+                {"id": "gender_male",   "title": "Male"},
+                {"id": "gender_female", "title": "Female"},
+                {"id": "gender_other",  "title": "Other"},
+            ],
+        )
         new_state = "awaiting_gender"
         new_temp  = {**temp_data, "dob": text}
 
     elif intent == "gender_provided":
-        gender = "Male" if t.startswith("m") else "Female"
-        reply = (
-            "What language do you prefer?\n\n"
-            "1. Tamil\n"
-            "2. English\n"
-            "3. Hindi"
+        if t in ["male", "m", "1"]:
+            gender = "Male"
+        elif t in ["female", "f", "2"]:
+            gender = "Female"
+        else:
+            gender = "Other"
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="What is your preferred language?",
+            buttons=[
+                {"id": "lang_tamil",   "title": "Tamil"},
+                {"id": "lang_english", "title": "English"},
+                {"id": "lang_hindi",   "title": "Hindi"},
+            ],
         )
         new_state = "awaiting_language"
         new_temp  = {**temp_data, "gender": gender}
@@ -587,7 +603,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         lang_map = {"1": "tamil", "2": "english", "3": "hindi",
                     "tamil": "tamil", "english": "english", "hindi": "hindi"}
         language = lang_map.get(t, "english")
-        reply = "Which city are you from?\n\nExample: Chennai"
+        reply = "Which city are you from?\n\n(e.g. Chennai)"
         new_state = "awaiting_city"
         new_temp  = {**temp_data, "language": language}
 
@@ -603,7 +619,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                                      doctor_id=doctor["id"] if doctor else "")
         patient_code = new_patient.get("patient_code", "") if new_patient else ""
         patient_id   = new_patient["id"] if new_patient else ""
-        await send_whatsapp_text(from_number, f"You are now registered with patient code *{patient_code}* at {clinic_name}! Welcome {name}! 🎉")
+        await send_whatsapp_text(from_number,
+            f"✅ Welcome {name}! You are now registered.\n\n"
+            f"🪪 Patient Code: *{patient_code}*\n\n"
+            f"What would you like to do next?")
         await send_main_menu(from_number, clinic_name)
         new_state = "idle"
 
@@ -662,21 +681,32 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── NEW FAMILY MEMBER — multi-step ────────────────────────
     elif intent == "new_member_name_provided":
-        reply     = f"Please enter their date of birth (DD/MM/YYYY):"
+        reply     = f"What is their date of birth?\n\n(e.g. 15 Jun 1990)"
         new_state = "awaiting_new_member_dob"
         new_temp  = {"new_name": text}
 
     elif intent == "new_member_dob_provided":
-        reply     = "Please enter their gender (Male/Female/Other):"
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="What is their gender?",
+            buttons=[
+                {"id": "gender_male",   "title": "Male"},
+                {"id": "gender_female", "title": "Female"},
+                {"id": "gender_other",  "title": "Other"},
+            ],
+        )
         new_state = "awaiting_new_member_gender"
         new_temp  = {**temp_data, "new_dob": text}
 
     elif intent == "new_member_gender_provided":
-        reply = (
-            "What language do they prefer?\n\n"
-            "1. Tamil\n"
-            "2. English\n"
-            "3. Hindi"
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="What is their preferred language?",
+            buttons=[
+                {"id": "lang_tamil",   "title": "Tamil"},
+                {"id": "lang_english", "title": "English"},
+                {"id": "lang_hindi",   "title": "Hindi"},
+            ],
         )
         new_state = "awaiting_new_member_language"
         new_temp  = {**temp_data, "new_gender": text}
@@ -685,7 +715,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         lang_map = {"1": "tamil", "2": "english", "3": "hindi",
                     "tamil": "tamil", "english": "english", "hindi": "hindi"}
         language = lang_map.get(t, "english")
-        reply = "Which city are they from?\n\nExample: Chennai"
+        reply = "Which city are they from?\n\n(e.g. Chennai)"
         new_state = "awaiting_new_member_city"
         new_temp  = {**temp_data, "new_language": language}
 
@@ -698,21 +728,36 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         gender_clean = "Male" if raw_gender.lower().startswith("m") else (
                         "Female" if raw_gender.lower().startswith("f") else "Other")
 
-        # Parse DOB: support DD/MM/YYYY or DD-MM-YYYY
+        # Parse DOB: "15 Jun 1990", "15/06/1990", "15-06-1990", "15 June 1990"
         dob_iso  = None
         age      = None
         birth_year = "0000"
         try:
-            sep = "/" if "/" in raw_dob else "-"
-            parts = raw_dob.split(sep)
-            if len(parts) == 3:
-                day, mon, yr = parts
-                dob_date  = date(int(yr), int(mon), int(day))
-                today_d   = date.today()
-                age       = today_d.year - dob_date.year - (
+            _dob_text = raw_dob.strip()
+            dob_date  = None
+            # Try numeric formats: DD/MM/YYYY or DD-MM-YYYY
+            for sep in ["/", "-"]:
+                if sep in _dob_text:
+                    _parts = _dob_text.split(sep)
+                    if len(_parts) == 3 and len(_parts[2]) == 4:
+                        day, mon, yr = _parts
+                        dob_date = date(int(yr), int(mon), int(day))
+                        break
+            # Try "15 Jun 1990" or "15 June 1990" format
+            if not dob_date:
+                import re as _re
+                _dm = _re.search(r"(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})", _dob_text)
+                if _dm:
+                    _d, _m_name, _yr = _dm.group(1), _dm.group(2).lower()[:3], _dm.group(3)
+                    _m_num = MONTHS.get(_m_name)
+                    if _m_num:
+                        dob_date = date(int(_yr), int(_m_num), int(_d))
+            if dob_date:
+                today_d    = date.today()
+                age        = today_d.year - dob_date.year - (
                     (today_d.month, today_d.day) < (dob_date.month, dob_date.day)
                 )
-                dob_iso   = dob_date.isoformat()
+                dob_iso    = dob_date.isoformat()
                 birth_year = str(dob_date.year)
         except Exception as _e:
             print(f"⚠️ DOB parse error: {_e}")
@@ -747,11 +792,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
         age_str = f"{age} yrs" if age is not None else "unknown"
         reg_msg = (
-            f"✅ Family member registered!\n\n"
-            f"👤 {raw_name}\n"
-            f"🪪 {patient_code}\n"
+            f"✅ {raw_name} has been added!\n\n"
+            f"🪪 Patient Code: *{patient_code}*\n"
             f"🎂 {age_str} · {gender_clean}\n\n"
-            f"Now let's book their appointment.\n\n"
+            f"What would you like to do next?"
         )
         base_temp = {"booking_for": new_pid, "booking_name": raw_name}
         if doctor.get("online_consultation_enabled"):
