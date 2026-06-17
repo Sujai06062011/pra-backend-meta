@@ -170,6 +170,103 @@ def format_display_date(date_str: str) -> str:
         return date_str
 
 
+def _format_appt_button_title(appt: dict) -> str:
+    """'Subramaniam M5' — max 20 chars for reply button title."""
+    name = appt.get("patient_name", appt.get("name", "Patient"))
+    first = name.split()[0]
+    token = appt.get("display_token", appt.get("token_number", ""))
+    return f"{first} {token}"[:20]
+
+
+def _format_appt_time_title(appt: dict) -> str:
+    """'Subramaniam 10AM' — max 20 chars, used when token unknown."""
+    name = appt.get("patient_name", appt.get("name", "Patient"))
+    first = name.split()[0]
+    time_str = str(appt.get("appointment_time", ""))[:5]
+    try:
+        hour = int(time_str.split(":")[0])
+        period = "AM" if hour < 12 else "PM"
+        h = hour if hour <= 12 else hour - 12
+        if h == 0:
+            h = 12
+        display_time = f"{h}{period}"
+    except Exception:
+        display_time = time_str
+    return f"{first} {display_time}"[:20]
+
+
+def _format_appt_row_description(appt: dict) -> str:
+    """'18 Jun · 10:15 AM · Token M5' — max 72 chars for list row."""
+    from database import get_display_token
+    months = ["Jan","Feb","Mar","Apr","May","Jun",
+              "Jul","Aug","Sep","Oct","Nov","Dec"]
+    date_str = str(appt.get("appointment_date", ""))[:10]
+    time_str = str(appt.get("appointment_time", ""))[:5]
+    token_num = appt.get("token_number", "")
+    parts = []
+    try:
+        d = date.fromisoformat(date_str)
+        parts.append(f"{d.day} {months[d.month-1]}")
+    except Exception:
+        if date_str:
+            parts.append(date_str)
+    if time_str:
+        parts.append(format_time(time_str))
+    if token_num:
+        d_tok = get_display_token(token_num, appt.get("appointment_time", ""))
+        parts.append(f"Token {d_tok}")
+    return " · ".join(parts)[:72]
+
+
+async def send_cancel_appointment_list(
+    from_number: str,
+    appointments: list,
+) -> None:
+    """Send upcoming appointments as interactive buttons (≤3) or list (>3)."""
+    from database import get_display_token
+    total = len(appointments)
+    if total <= 3:
+        buttons = []
+        body_lines = ["Your upcoming appointments:\n"]
+        for i, appt in enumerate(appointments, 1):
+            token_num = appt.get("token_number", "")
+            d_tok = get_display_token(token_num, appt.get("appointment_time", "")) if token_num else ""
+            appt_with_tok = {**appt, "display_token": d_tok}
+            buttons.append({
+                "id": f"cancel_{appt['id']}",
+                "title": _format_appt_button_title(appt_with_tok) if d_tok else _format_appt_time_title(appt),
+            })
+            desc = _format_appt_row_description(appt_with_tok)
+            name = appt.get("patient_name", appt.get("name", ""))
+            body_lines.append(f"{i}. {name} — {desc}")
+        body_lines.append("\nWhich would you like to cancel?")
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text="\n".join(body_lines),
+            buttons=buttons,
+            footer_text="Reply MENU to go back",
+        )
+    else:
+        rows = []
+        for appt in appointments[:9]:
+            name = appt.get("patient_name", appt.get("name", "Patient"))
+            rows.append({
+                "id": f"cancel_{appt['id']}",
+                "title": name[:24],
+                "description": _format_appt_row_description(appt),
+            })
+        await send_meta_list(
+            to_number=from_number,
+            body_text=(
+                f"You have {total} upcoming appointments.\n"
+                "Which would you like to cancel?"
+            ),
+            button_label="Select appointment",
+            sections=[{"title": "Upcoming appointments", "rows": rows}],
+            footer_text="Reply MENU to go back",
+        )
+
+
 async def send_slot_list(
     from_number: str,
     slots: list,
@@ -522,7 +619,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "slot_text_input"
     elif current_state == "awaiting_slot_confirmation":
         intent = "slot_confirm_text_input"
-    elif current_state == "awaiting_cancel_choice":
+    elif current_state in ("awaiting_cancel_choice", "awaiting_cancel_selection"):
         intent = "cancel_choice"
     elif current_state == "awaiting_query_patient_select":
         intent = "query_patient_selected"
@@ -1380,22 +1477,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             reply     = "You have no upcoming appointments to cancel.\n\nReply 1 to book an appointment."
             new_state = "idle"
         else:
-            apt_list = "Your upcoming appointments:\n\n"
-            for i, apt in enumerate(appointments, 1):
-                apt_date = datetime.strptime(
-                    apt["appointment_date"], "%Y-%m-%d"
-                ).strftime("%d %B %Y")
-                apt_time = format_time(apt["appointment_time"][:5])
-                token    = apt.get("token_number")
-                name     = apt.get("patient_name", "")
-                token_str = ""
-                if token:
-                    d_tok = get_display_token(token, apt["appointment_time"])
-                    token_str = f" (Token {d_tok})"
-                apt_list += f"{i}. {name} — {apt_date} at {apt_time}{token_str}\n"
-            apt_list += "\nReply with number to cancel. Reply 0 to go back."
-            reply     = apt_list
-            new_state = "awaiting_cancel_choice"
+            await send_cancel_appointment_list(from_number, appointments)
+            new_state = "awaiting_cancel_selection"
             new_temp  = {"appointments": appointments}
 
     elif intent == "cancel_choice":
@@ -1426,8 +1509,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 )
                 new_state = "idle"
             except (IndexError, ValueError):
-                reply     = "Invalid choice. Please reply with a number from the list."
-                new_state = "awaiting_cancel_choice"
+                reply     = "Invalid choice. Please tap a button or reply with a number from the list."
+                new_state = "awaiting_cancel_selection"
                 new_temp  = temp_data
 
     # ── CLINIC TIMINGS ────────────────────────────────────────

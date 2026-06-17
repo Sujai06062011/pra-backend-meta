@@ -12,12 +12,12 @@ import json
 import pytz
 from datetime import date, datetime, timedelta
 from collections import defaultdict
-from whatsapp_handler import handle_message, send_slot_list, format_display_date, format_time
+from whatsapp_handler import handle_message, send_slot_list, format_display_date, format_time, send_cancel_appointment_list
 from scheduler import init_scheduler, reschedule
 from followup import prewarm_response_audios
 from database import supabase, save_conversation_state as upsert_conversation_state
 from database import get_display_token, assign_token_for_slot, is_slot_available, _time_str
-from database import get_conversation_state
+from database import get_conversation_state, cancel_appointment
 import config_loader
 import jwt as pyjwt
 import time as time_module
@@ -31,6 +31,8 @@ from consultation_helpers import (
     create_consultation_for_appointment,
     send_video_link_to_patient,
     send_meta_buttons,
+    send_meta_list,
+    send_whatsapp_text,
 )
 
 
@@ -318,6 +320,51 @@ async def handle_member_interactive(from_number: str, selection_id: str, clinic_
     await handle_inbound_message(from_number, synthetic_text, clinic_number)
 
 
+async def handle_appointment_cancel(from_number: str, appointment_id: str):
+    """Show a confirm/keep confirmation before cancelling an appointment."""
+    appt_res = supabase.table("appointments").select(
+        "id, appointment_date, appointment_time, token_number, consultation_type, patients(name)"
+    ).eq("id", appointment_id).single().execute()
+
+    if not appt_res.data:
+        await send_meta_text(from_number, "Appointment not found. Reply MENU for main menu.")
+        return
+
+    appt = appt_res.data
+    patient_name = (appt.get("patients") or {}).get("name", "Patient")
+    date_str = str(appt.get("appointment_date", ""))[:10]
+    time_str = str(appt.get("appointment_time", ""))[:5]
+    token_num = appt.get("token_number", "")
+    d_tok = get_display_token(token_num, appt.get("appointment_time", "")) if token_num else ""
+
+    display_date = format_display_date(date_str)
+    display_time = format_time(time_str)
+    type_label = "💻 Online" if appt.get("consultation_type") == "online" else "🏥 In Clinic"
+    token_line = f"Token {d_tok}" if d_tok else ""
+
+    body = (
+        f"Cancel this appointment?\n\n"
+        f"👤 {patient_name}\n"
+        f"📅 {display_date}\n"
+        f"⏰ {display_time}\n"
+        f"{type_label}" + (f" · {token_line}" if token_line else "")
+    )
+
+    await send_meta_buttons(
+        to_number=from_number,
+        body_text=body,
+        buttons=[
+            {"id": f"confirm_cancel_{appointment_id}", "title": "Yes, Cancel"},
+            {"id": "keep_appointment", "title": "Keep it"},
+        ],
+        footer_text="This cannot be undone",
+    )
+
+    _, temp_data = get_conversation_state(from_number)
+    upsert_conversation_state(from_number, "awaiting_cancel_confirm",
+                              {**temp_data, "cancelling_appt_id": appointment_id})
+
+
 async def handle_inbound_message(from_number: str, text: str, to_number: str = ""):
     """Run the conversation engine on an inbound Meta text and reply via Meta"""
     reply = await handle_message(from_number, text, to_number, "")
@@ -476,6 +523,16 @@ async def meta_webhook_inbound(request: Request):
                             footer_text="Tap Confirm to book",
                         )
 
+                elif list_id.startswith("cancel_"):
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state not in ("awaiting_cancel_selection", "awaiting_cancel_choice"):
+                        print(f"[STALE] cancel list tap ignored, state={current_state}")
+                        await send_meta_text(from_number,
+                            "Your session has moved on. Reply MENU to start over.")
+                    else:
+                        appointment_id = list_id[len("cancel_"):]
+                        await handle_appointment_cancel(from_number, appointment_id)
+
                 elif list_id.startswith("member_"):
                     current_state, _ = get_conversation_state(from_number)
                     if current_state != "awaiting_booking_patient_select":
@@ -591,6 +648,60 @@ async def meta_webhook_inbound(request: Request):
                             await send_meta_text(from_number, "No problem! Please choose another slot.")
                             upsert_conversation_state(from_number, "awaiting_slot_selection", temp_data)
                             await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
+
+                    elif button_id.startswith("confirm_cancel_"):
+                        current_state, temp_data = get_conversation_state(from_number)
+                        if current_state != "awaiting_cancel_confirm":
+                            print(f"[STALE] confirm_cancel ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your session has moved on. Reply MENU to start over.")
+                        else:
+                            appointment_id = button_id[len("confirm_cancel_"):]
+                            cancel_appointment(appointment_id)
+
+                            appt_res = supabase.table("appointments").select(
+                                "appointment_date, appointment_time, token_number, patients(name)"
+                            ).eq("id", appointment_id).single().execute()
+
+                            if appt_res.data:
+                                a = appt_res.data
+                                pname = (a.get("patients") or {}).get("name", "Patient")
+                                d_tok = get_display_token(a.get("token_number", ""), a.get("appointment_time", "")) if a.get("token_number") else ""
+                                display_date = format_display_date(str(a.get("appointment_date", ""))[:10])
+                                display_time = format_time(str(a.get("appointment_time", ""))[:5])
+                                token_line = f"Token {d_tok}" if d_tok else ""
+                                msg = (
+                                    f"✅ Appointment cancelled.\n\n"
+                                    f"👤 {pname}\n"
+                                    f"📅 {display_date} · {display_time}"
+                                    + (f"\n{token_line}" if token_line else "")
+                                    + "\n\nWe hope to see you soon! Reply MENU to book again."
+                                )
+                            else:
+                                msg = "✅ Appointment cancelled.\n\nReply MENU for main menu."
+
+                            await send_meta_text(from_number, msg)
+                            upsert_conversation_state(from_number, "idle", {})
+                            await handle_inbound_message(from_number, "MENU", clinic_number)
+
+                    elif button_id == "keep_appointment":
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state == "awaiting_cancel_confirm":
+                            await send_meta_text(from_number,
+                                "No problem! Your appointment is kept. 👍\n\nReply MENU for main menu.")
+                            upsert_conversation_state(from_number, "idle", {})
+                            await handle_inbound_message(from_number, "MENU", clinic_number)
+
+                    elif button_id.startswith("cancel_") and button_id not in ("cancel_slot",):
+                        # cancel_{uuid} — appointment cancellation from buttons (≤3 appts)
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state not in ("awaiting_cancel_selection", "awaiting_cancel_choice"):
+                            print(f"[STALE] cancel button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your session has moved on. Reply MENU to start over.")
+                        else:
+                            appointment_id = button_id[len("cancel_"):]
+                            await handle_appointment_cancel(from_number, appointment_id)
 
                     elif button_id in ("visit_in_clinic", "visit_online"):
                         current_state, _ = get_conversation_state(from_number)
