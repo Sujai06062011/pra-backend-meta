@@ -4,6 +4,8 @@ from consultation_helpers import (
     is_online_consultation_slot,
     create_consultation_for_appointment,
     send_video_link_to_patient,
+    send_meta_list,
+    send_whatsapp_text,
 )
 from database import (
     get_doctor_by_whatsapp, get_patient_by_mobile, get_conversation_state,
@@ -129,6 +131,7 @@ def parse_date(text: str):
 
 
 def build_main_menu(patient_name: str, clinic_name: str) -> str:
+    # Kept as fallback for non-interactive contexts (e.g. concatenated into other messages)
     return (
         f"👋 Welcome to\n🏥 *{clinic_name}*\n\n"
         f"1️⃣ Book Appointment\n"
@@ -139,6 +142,33 @@ def build_main_menu(patient_name: str, clinic_name: str) -> str:
         f"6️⃣ Ask Doctor a Question\n\n"
         f"Reply with a number.\n"
         f"Reply MENU for main menu or BYE to end."
+    )
+
+
+def get_main_menu_sections() -> list:
+    return [
+        {
+            "title": "Clinic Services",
+            "rows": [
+                {"id": "menu_book_appointment",   "title": "Book Appointment",      "description": "Schedule an in-clinic or online visit"},
+                {"id": "menu_queue_status",        "title": "Queue Status",           "description": "Check your position in today's queue"},
+                {"id": "menu_cancel_appointment",  "title": "Cancel Appointment",     "description": "Cancel an existing booking"},
+                {"id": "menu_clinic_timings",      "title": "Clinic Timings",         "description": "View our opening hours"},
+                {"id": "menu_receptionist",        "title": "Speak to Receptionist",  "description": "Connect with our front desk"},
+                {"id": "menu_ask_doctor",          "title": "Ask Doctor a Question",  "description": "Send a medical query to the doctor"},
+            ],
+        }
+    ]
+
+
+async def send_main_menu(from_number: str, clinic_name: str):
+    """Send the main menu as a Meta interactive list message."""
+    await send_meta_list(
+        to_number=from_number,
+        body_text=f"👋 Welcome to\n🏥 *{clinic_name}*\n\nHow can we help you today?",
+        button_label="View options",
+        sections=get_main_menu_sections(),
+        footer_text="Reply BYE to end conversation",
     )
 
 
@@ -220,7 +250,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     if t in ["menu", "main menu", "back", "home",
              "hi", "hello", "hey", "start", "help"]:
         save_conversation_state(from_number, "idle", {})
-        return build_main_menu(patient_name, clinic_name)
+        await send_main_menu(from_number, clinic_name)
+        return None
 
     if t in ["bye", "goodbye", "exit", "end", "quit"]:
         save_conversation_state(from_number, "idle", {})
@@ -233,10 +264,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             if t == "3":
                 save_followup_reply(from_number, t)
                 save_conversation_state(from_number, "idle", {})
-                return (
-                    f"No problem! Let us book an appointment for you. 🏥\n\n"
-                    + build_main_menu(patient_name, clinic_name)
-                )
+                await send_whatsapp_text(from_number, "No problem! Let us book an appointment for you. 🏥")
+                await send_main_menu(from_number, clinic_name)
+                return None
             save_followup_reply(from_number, t)
             responses = {
                 "1": f"Wonderful! We are glad you are feeling better. 😊\n\nStay healthy!\n- {clinic_name}",
@@ -359,15 +389,13 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                                      doctor_id=doctor["id"] if doctor else "")
         patient_code = new_patient.get("patient_code", "") if new_patient else ""
         patient_id   = new_patient["id"] if new_patient else ""
-        reply = (
-            f"You are now registered with patient code *{patient_code}* at {clinic_name}! Welcome {name}! 🎉\n\n"
-            + build_main_menu(name, clinic_name)
-        )
+        await send_whatsapp_text(from_number, f"You are now registered with patient code *{patient_code}* at {clinic_name}! Welcome {name}! 🎉")
+        await send_main_menu(from_number, clinic_name)
         new_state = "idle"
 
     # ── MAIN MENU ─────────────────────────────────────────────
     elif intent == "menu":
-        reply     = build_main_menu(patient_name, clinic_name)
+        await send_main_menu(from_number, clinic_name)
         new_state = "idle"
 
     # ── BOOK APPOINTMENT — unified flow ───────────────────────
@@ -1074,7 +1102,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     elif intent == "cancel_choice":
         if t == "0":
-            reply     = build_main_menu(patient_name, clinic_name)
+            await send_main_menu(from_number, clinic_name)
             new_state = "idle"
         else:
             try:
@@ -1215,7 +1243,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── DEFAULT ───────────────────────────────────────────────
     else:
-        reply     = build_main_menu(patient_name or "", clinic_name)
+        await send_main_menu(from_number, clinic_name)
         new_state = "idle"
 
     # Save conversation state

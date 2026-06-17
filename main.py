@@ -337,59 +337,77 @@ async def meta_webhook_inbound(request: Request):
             await handle_inbound_message(from_number, text, clinic_number)
 
         elif msg_type == "interactive":
-            button_id = msg["interactive"]["button_reply"]["id"]
-            print(f"[Meta BUTTON] from={from_number} id={button_id}")
-            parts = button_id.split("__", 1)
-            action = parts[0]
-            followup_id = parts[1] if len(parts) > 1 else None
+            interactive_type = msg["interactive"].get("type", "button_reply")
 
-            if followup_id:
-                if action == "ok":
-                    supabase.table("followups").update({
-                        "call_status": "Completed", "response": "Better"
-                    }).eq("id", followup_id).execute()
-                    await send_meta_text(from_number,
-                        "Great to hear! Wishing continued good health. Take care! 🌟\n"
-                        "— Dr. Kumar Child Care Clinic")
+            if interactive_type == "list_reply":
+                list_id = msg["interactive"]["list_reply"]["id"]
+                print(f"[Meta LIST_REPLY] from={from_number} id={list_id}")
+                list_id_to_text = {
+                    "menu_book_appointment":  "1",
+                    "menu_queue_status":      "2",
+                    "menu_cancel_appointment": "3",
+                    "menu_clinic_timings":    "4",
+                    "menu_receptionist":      "5",
+                    "menu_ask_doctor":        "6",
+                }
+                mapped_text = list_id_to_text.get(list_id, "MENU")
+                await handle_inbound_message(from_number, mapped_text, clinic_number)
 
-                elif action == "recovering":
-                    supabase.table("followups").update({
-                        "call_status": "Completed", "response": "Same"
-                    }).eq("id", followup_id).execute()
-                    original = supabase.table("followups").select("*").eq(
-                        "id", followup_id).single().execute().data
-                    new_date = (datetime.now(IST) + timedelta(days=3)).date().isoformat()
-                    supabase.table("followups").insert({
-                        "patient_id": original["patient_id"],
-                        "visit_id": original["visit_id"],
-                        "doctor_id": original["doctor_id"],
-                        "scheduled_date": new_date,
-                        "call_status": "Pending",
-                        "followup_day": (original.get("followup_day") or 1) + 1,
-                        "channel": "call"
-                    }).execute()
-                    await send_meta_text(from_number,
-                        "Understood! We'll check in again in 3 days. "
-                        "Rest well and follow the prescription. 🙏\n"
-                        "— Dr. Kumar Child Care Clinic")
+            else:
+                # button_reply
+                button_id = msg["interactive"]["button_reply"]["id"]
+                print(f"[Meta BUTTON] from={from_number} id={button_id}")
+                parts = button_id.split("__", 1)
+                action = parts[0]
+                followup_id = parts[1] if len(parts) > 1 else None
 
-                elif action == "appt":
-                    supabase.table("followups").update({
-                        "call_status": "Completed", "response": "Worse"
-                    }).eq("id", followup_id).execute()
-                    original = supabase.table("followups").select(
-                        "*, patients(name, language)"
-                    ).eq("id", followup_id).single().execute().data
-                    patient_name = original["patients"]["name"]
-                    patient_id = original["patient_id"]
-                    upsert_conversation_state(from_number, "awaiting_booking_date", {
-                        "patient_id": patient_id,
-                        "patient_name": patient_name,
-                        "doctor_id": "8c33abe0-5d2e-4613-9437-c7c375e8d162"
-                    })
-                    await send_meta_text(from_number,
-                        f"We'll book an appointment for {patient_name}. "
-                        f"What date works for you? (e.g. 15 Jun or tomorrow)")
+                if followup_id:
+                    if action == "ok":
+                        supabase.table("followups").update({
+                            "call_status": "Completed", "response": "Better"
+                        }).eq("id", followup_id).execute()
+                        await send_meta_text(from_number,
+                            "Great to hear! Wishing continued good health. Take care! 🌟\n"
+                            "— Dr. Kumar Child Care Clinic")
+
+                    elif action == "recovering":
+                        supabase.table("followups").update({
+                            "call_status": "Completed", "response": "Same"
+                        }).eq("id", followup_id).execute()
+                        original = supabase.table("followups").select("*").eq(
+                            "id", followup_id).single().execute().data
+                        new_date = (datetime.now(IST) + timedelta(days=3)).date().isoformat()
+                        supabase.table("followups").insert({
+                            "patient_id": original["patient_id"],
+                            "visit_id": original["visit_id"],
+                            "doctor_id": original["doctor_id"],
+                            "scheduled_date": new_date,
+                            "call_status": "Pending",
+                            "followup_day": (original.get("followup_day") or 1) + 1,
+                            "channel": "call"
+                        }).execute()
+                        await send_meta_text(from_number,
+                            "Understood! We'll check in again in 3 days. "
+                            "Rest well and follow the prescription. 🙏\n"
+                            "— Dr. Kumar Child Care Clinic")
+
+                    elif action == "appt":
+                        supabase.table("followups").update({
+                            "call_status": "Completed", "response": "Worse"
+                        }).eq("id", followup_id).execute()
+                        original = supabase.table("followups").select(
+                            "*, patients(name, language)"
+                        ).eq("id", followup_id).single().execute().data
+                        patient_name = original["patients"]["name"]
+                        patient_id = original["patient_id"]
+                        upsert_conversation_state(from_number, "awaiting_booking_date", {
+                            "patient_id": patient_id,
+                            "patient_name": patient_name,
+                            "doctor_id": "8c33abe0-5d2e-4613-9437-c7c375e8d162"
+                        })
+                        await send_meta_text(from_number,
+                            f"We'll book an appointment for {patient_name}. "
+                            f"What date works for you? (e.g. 15 Jun or tomorrow)")
 
     except Exception as e:
         print(f"[Meta Webhook ERROR] {str(e)}")
