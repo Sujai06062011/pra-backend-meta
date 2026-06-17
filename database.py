@@ -138,7 +138,7 @@ def get_booked_slots(doctor_id: str, date_str: str):
         "appointment_time"
     ).eq("doctor_id", doctor_id).eq("appointment_date", date_str).eq(
         "status", "Confirmed"
-    ).execute()
+    ).neq("consultation_type", "online").execute()
     return [r["appointment_time"][:5] for r in result.data]
 
 
@@ -227,7 +227,7 @@ def is_slot_available(doctor_id: str, appointment_date: str, appointment_time) -
         "doctor_id", doctor_id
     ).eq("appointment_date", appointment_date).eq(
         "appointment_time", _time_str(appointment_time)
-    ).in_("status", ["Confirmed", "In Progress", "Completed"]).execute()
+    ).in_("status", ["Confirmed", "In Progress", "Completed"]).neq("consultation_type", "online").execute()
     return len(result.data or []) == 0
 
 
