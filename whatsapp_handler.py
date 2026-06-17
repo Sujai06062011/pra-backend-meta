@@ -497,11 +497,14 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 p = all_patients[choice]
                 base_temp = {"booking_for": p["id"], "booking_name": p["name"]}
                 if doctor.get("online_consultation_enabled"):
-                    reply = (
-                        f"Would you like to book:\n\n"
-                        f"1️⃣ In Clinic\n"
-                        f"2️⃣ Online Consultation 💻"
-                        + MENU_HINT
+                    await send_meta_buttons(
+                        to_number=from_number,
+                        body_text="Would you like to book:",
+                        buttons=[
+                            {"id": "visit_in_clinic", "title": "In Clinic"},
+                            {"id": "visit_online",    "title": "Online Consultation"},
+                        ],
+                        footer_text="Reply MENU for main menu",
                     )
                     new_state = "awaiting_consult_type"
                     new_temp  = base_temp
@@ -615,11 +618,15 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         )
         base_temp = {"booking_for": new_pid, "booking_name": raw_name}
         if doctor.get("online_consultation_enabled"):
-            reply = reg_msg + (
-                "Would you like to book:\n\n"
-                "1️⃣ In Clinic\n"
-                "2️⃣ Online Consultation 💻"
-                + MENU_HINT
+            await send_whatsapp_text(from_number, reg_msg)
+            await send_meta_buttons(
+                to_number=from_number,
+                body_text="Would you like to book:",
+                buttons=[
+                    {"id": "visit_in_clinic", "title": "In Clinic"},
+                    {"id": "visit_online",    "title": "Online Consultation"},
+                ],
+                footer_text="Reply MENU for main menu",
             )
             new_state = "awaiting_consult_type"
             new_temp  = base_temp

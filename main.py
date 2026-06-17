@@ -239,6 +239,13 @@ async def send_meta_template(to_number: str, template_name: str, lang_code: str 
         return r.json()
 
 
+async def handle_visit_type_selected(from_number: str, visit_type: str, clinic_number: str = ""):
+    """Translate a visit_in_clinic / visit_online button tap into the existing consult-type flow."""
+    visit_text = "1" if visit_type == "in_clinic" else "2"
+    print(f"[VISIT TYPE] {from_number} type={visit_type} → '{visit_text}'")
+    await handle_inbound_message(from_number, visit_text, clinic_number)
+
+
 async def handle_member_interactive(from_number: str, selection_id: str, clinic_number: str = ""):
     """Translate a member_* interactive button/list tap into the existing booking flow."""
     _, temp_data = get_conversation_state(from_number)
@@ -391,7 +398,10 @@ async def meta_webhook_inbound(request: Request):
                     action = parts[0]
                     followup_id = parts[1] if len(parts) > 1 else None
 
-                    if followup_id:
+                    if button_id in ("visit_in_clinic", "visit_online"):
+                        visit_type = "in_clinic" if button_id == "visit_in_clinic" else "online"
+                        await handle_visit_type_selected(from_number, visit_type, clinic_number)
+                    elif followup_id:
                         if action == "ok":
                             supabase.table("followups").update({
                                 "call_status": "Completed", "response": "Better"
