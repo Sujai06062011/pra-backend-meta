@@ -12,7 +12,7 @@ import json
 import pytz
 from datetime import date, datetime, timedelta
 from collections import defaultdict
-from whatsapp_handler import handle_message
+from whatsapp_handler import handle_message, send_slot_list, format_display_date, format_time
 from scheduler import init_scheduler, reschedule
 from followup import prewarm_response_audios
 from database import supabase, save_conversation_state as upsert_conversation_state
@@ -30,6 +30,7 @@ from consultation_helpers import (
     is_online_consultation_slot,
     create_consultation_for_appointment,
     send_video_link_to_patient,
+    send_meta_buttons,
 )
 
 
@@ -239,6 +240,39 @@ async def send_meta_template(to_number: str, template_name: str, lang_code: str 
         return r.json()
 
 
+async def handle_session_selected(from_number: str, session: str, clinic_number: str = ""):
+    """Translate a session_morning / session_evening button tap into a slot list."""
+    _, temp_data = get_conversation_state(from_number)
+    slots        = temp_data.get(f"{session}_slots", [])
+    booking_name = temp_data.get("booking_name", "")
+    parsed_date  = temp_data.get("parsed_date", "")
+    if not slots:
+        await send_meta_text(from_number,
+            f"Sorry, no {session} slots available. Reply MENU to start over.")
+        return
+    upsert_conversation_state(from_number, "awaiting_slot_selection", {**temp_data, "session": session})
+    await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
+
+
+async def handle_slot_confirmed(from_number: str, time_str: str, clinic_number: str = ""):
+    """Translate a confirm_slot button tap into the existing slot_selected flow."""
+    _, temp_data     = get_conversation_state(from_number)
+    available_slots  = temp_data.get("available_slots", [])
+    slot_time        = time_str[:5]  # normalise to "HH:MM"
+    try:
+        idx = available_slots.index(slot_time)
+    except ValueError:
+        # try with seconds suffix
+        idx = next((i for i, s in enumerate(available_slots) if str(s)[:5] == slot_time), -1)
+    if idx < 0:
+        await send_meta_text(from_number, "Sorry, could not find that slot. Reply MENU to start over.")
+        return
+    print(f"[SLOT CONFIRMED] {from_number} time={slot_time} idx={idx}")
+    # Restore awaiting_slot state so slot_selected intent fires correctly
+    upsert_conversation_state(from_number, "awaiting_slot", temp_data)
+    await handle_inbound_message(from_number, str(idx + 1), clinic_number)
+
+
 async def handle_date_selected(from_number: str, date_str: str, clinic_number: str = ""):
     """Translate a date_today_* / date_tomorrow_* button tap into the existing date flow."""
     _, temp_data = get_conversation_state(from_number)
@@ -388,7 +422,61 @@ async def meta_webhook_inbound(request: Request):
             if interactive_type == "list_reply":
                 list_id = msg["interactive"]["list_reply"]["id"]
                 print(f"[Meta LIST_REPLY] from={from_number} id={list_id}")
-                if list_id.startswith("member_"):
+                if list_id.startswith("slots_more_"):
+                    # slots_more_{date}_{session}_{offset}  e.g. slots_more_2026-06-20_morning_5
+                    current_state, temp_data = get_conversation_state(from_number)
+                    if current_state not in ("awaiting_slot_selection", "awaiting_slot_confirmation"):
+                        await send_meta_text(from_number,
+                            "Your booking is already in progress.\n"
+                            "Reply MENU to start over or continue your booking.")
+                    else:
+                        remainder = list_id[len("slots_more_"):]          # "2026-06-20_morning_5"
+                        parts     = remainder.split("_")
+                        date_str  = parts[0]                               # "2026-06-20"
+                        session   = parts[1]                               # "morning"/"evening"
+                        offset    = int(parts[2])                          # 5, 10, …
+                        slots     = temp_data.get(f"{session}_slots", [])
+                        booking_name = temp_data.get("booking_name", "")
+                        upsert_conversation_state(from_number, "awaiting_slot_selection", temp_data)
+                        await send_slot_list(from_number, slots, date_str, session, offset, booking_name)
+
+                elif list_id.startswith("slot_"):
+                    # slot_{date}_{time}  e.g. slot_2026-06-20_10:00
+                    current_state, temp_data = get_conversation_state(from_number)
+                    if current_state not in ("awaiting_slot_selection",):
+                        print(f"[STALE] slot list tap ignored, state={current_state}")
+                        await send_meta_text(from_number,
+                            "Your booking is already in progress.\n"
+                            "Reply MENU to start over or continue your booking.")
+                    else:
+                        remainder    = list_id[len("slot_"):]              # "2026-06-20_10:00"
+                        date_str, time_str = remainder.split("_", 1)
+                        booking_name = temp_data.get("booking_name", "")
+                        patient_id_  = temp_data.get("booking_for", "")
+                        session      = temp_data.get("session", "morning")
+                        display_time = format_time(time_str[:5])
+                        display_date = format_display_date(date_str)
+                        # Save pending slot and set confirmation state
+                        upsert_conversation_state(
+                            from_number, "awaiting_slot_confirmation",
+                            {**temp_data, "pending_slot": time_str[:5]},
+                        )
+                        await send_meta_buttons(
+                            to_number=from_number,
+                            body_text=(
+                                f"Confirm this appointment?\n\n"
+                                f"👤 {booking_name}\n"
+                                f"📅 {display_date}\n"
+                                f"⏰ {display_time}"
+                            ),
+                            buttons=[
+                                {"id": f"confirm_slot_{date_str}_{time_str[:5]}", "title": "✅ Confirm"},
+                                {"id": "cancel_slot", "title": "❌ Cancel"},
+                            ],
+                            footer_text="Tap Confirm to book",
+                        )
+
+                elif list_id.startswith("member_"):
                     current_state, _ = get_conversation_state(from_number)
                     if current_state != "awaiting_booking_patient_select":
                         print(f"[STALE] member list ignored, state={current_state}")
@@ -443,6 +531,42 @@ async def meta_webhook_inbound(request: Request):
                             # date_today_2026-06-17 or date_tomorrow_2026-06-18
                             date_str = button_id.split("_")[-1]  # "2026-06-17"
                             await handle_date_selected(from_number, date_str, clinic_number)
+
+                    elif button_id in ("session_morning", "session_evening"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state != "awaiting_session_selection":
+                            print(f"[STALE] session button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your booking is already in progress.\n"
+                                "Reply MENU to start over or continue your booking.")
+                        else:
+                            session = "morning" if button_id == "session_morning" else "evening"
+                            await handle_session_selected(from_number, session, clinic_number)
+
+                    elif button_id.startswith("confirm_slot_"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state != "awaiting_slot_confirmation":
+                            print(f"[STALE] confirm_slot button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your booking is already in progress.\n"
+                                "Reply MENU to start over or continue your booking.")
+                        else:
+                            # confirm_slot_2026-06-20_10:00
+                            remainder = button_id[len("confirm_slot_"):]
+                            date_str, time_str = remainder.split("_", 1)
+                            await handle_slot_confirmed(from_number, time_str, clinic_number)
+
+                    elif button_id == "cancel_slot":
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state == "awaiting_slot_confirmation":
+                            _, temp_data = get_conversation_state(from_number)
+                            session      = temp_data.get("session", "morning")
+                            parsed_date  = temp_data.get("parsed_date", "")
+                            booking_name = temp_data.get("booking_name", "")
+                            slots        = temp_data.get(f"{session}_slots", [])
+                            await send_meta_text(from_number, "No problem! Please choose another slot.")
+                            upsert_conversation_state(from_number, "awaiting_slot_selection", temp_data)
+                            await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
 
                     elif button_id in ("visit_in_clinic", "visit_online"):
                         current_state, _ = get_conversation_state(from_number)

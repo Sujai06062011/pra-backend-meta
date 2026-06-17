@@ -158,6 +158,110 @@ def parse_date(text: str):
     return f"{year}-{month}-{day}", None
 
 
+def format_display_date(date_str: str) -> str:
+    """Convert '2026-06-20' → 'Sat 20 Jun'."""
+    try:
+        d = date.fromisoformat(date_str)
+        days   = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        months = ["Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec"]
+        return f"{days[d.weekday()]} {d.day} {months[d.month-1]}"
+    except Exception:
+        return date_str
+
+
+async def send_slot_list(
+    from_number: str,
+    slots: list,
+    selected_date: str,
+    session: str,
+    offset: int = 0,
+    patient_name: str = "",
+) -> None:
+    """Send up to 5 slots as a WhatsApp interactive list. Adds 'See more' if needed."""
+    PAGE_SIZE    = 5
+    page_slots   = slots[offset: offset + PAGE_SIZE]
+    remaining    = slots[offset + PAGE_SIZE:]
+    session_icon  = "🌅" if session == "morning" else "🌙"
+    session_label = "Morning" if session == "morning" else "Evening"
+    first_name    = patient_name.split()[0] if patient_name else ""
+    name_part     = f"for {first_name}" if first_name else ""
+
+    rows = []
+    for slot in page_slots:
+        slot_time = str(slot)[:5]
+        rows.append({
+            "id":          f"slot_{selected_date}_{slot_time}",
+            "title":       format_time(slot_time),
+            "description": f"{session_label} · {format_display_date(selected_date)}",
+        })
+
+    if remaining:
+        rows.append({
+            "id":          f"slots_more_{selected_date}_{session}_{offset + PAGE_SIZE}",
+            "title":       "See more slots →",
+            "description": f"{len(remaining)} more available",
+        })
+
+    await send_meta_list(
+        to_number=from_number,
+        body_text=(
+            f"{session_icon} {session_label} slots {name_part}\n"
+            f"📅 {format_display_date(selected_date)}"
+        ),
+        button_label="Choose a slot",
+        sections=[{"title": f"{session_label} slots", "rows": rows}],
+        footer_text="Tap a slot to select it",
+    )
+
+
+async def send_session_or_slot_ui(
+    from_number: str,
+    morning_slots: list,
+    evening_slots: list,
+    parsed_date: str,
+    booking_name: str,
+    base_temp: dict,
+) -> tuple:
+    """
+    Send session selection buttons (both sessions) or jump straight to slot list
+    (single session). Returns (new_state, new_temp) for the caller to set.
+    """
+    has_morning = bool(morning_slots)
+    has_evening = bool(evening_slots)
+
+    if has_morning and has_evening:
+        await send_meta_buttons(
+            to_number=from_number,
+            body_text=f"📅 {format_display_date(parsed_date)}\n\nWhich session?",
+            buttons=[
+                {"id": "session_morning", "title": "🌅 Morning"},
+                {"id": "session_evening", "title": "🌙 Evening"},
+            ],
+            footer_text=(
+                f"Morning: {len(morning_slots)} slots  "
+                f"Evening: {len(evening_slots)} slots"
+            ),
+        )
+        slot_temp = {
+            **base_temp,
+            "morning_slots": morning_slots,
+            "evening_slots": evening_slots,
+        }
+        return "awaiting_session_selection", slot_temp
+
+    session = "morning" if has_morning else "evening"
+    slots   = morning_slots if has_morning else evening_slots
+    slot_temp = {
+        **base_temp,
+        "morning_slots": morning_slots,
+        "evening_slots": evening_slots,
+        "session": session,
+    }
+    await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
+    return "awaiting_slot_selection", slot_temp
+
+
 def build_main_menu(patient_name: str, clinic_name: str) -> str:
     # Kept as fallback for non-interactive contexts (e.g. concatenated into other messages)
     return (
@@ -412,6 +516,12 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "consult_type_selected"
     elif current_state == "awaiting_slot":
         intent = "slot_selected"
+    elif current_state == "awaiting_session_selection":
+        intent = "session_text_input"
+    elif current_state == "awaiting_slot_selection":
+        intent = "slot_text_input"
+    elif current_state == "awaiting_slot_confirmation":
+        intent = "slot_confirm_text_input"
     elif current_state == "awaiting_cancel_choice":
         intent = "cancel_choice"
     elif current_state == "awaiting_query_patient_select":
@@ -752,24 +862,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 reply     = f"Sorry! All online consultation slots for {booking_date} are booked. Please try another date."
                 new_state = "idle"
             else:
-                morning_online = [(s, sess) for s, sess in available_full if sess == "morning"]
-                evening_online = [(s, sess) for s, sess in available_full if sess != "morning"]
-                slot_list = f"💻 Online Consultation slots on {booking_date}:\n"
-                idx = 1
-                if morning_online:
-                    slot_list += "\n🌅 Morning\n"
-                    for s, _ in morning_online:
-                        slot_list += f"{idx}. {format_time(s)}\n"
-                        idx += 1
-                if evening_online:
-                    slot_list += "\n🌆 Evening\n"
-                    for s, _ in evening_online:
-                        slot_list += f"{idx}. {format_time(s)}\n"
-                        idx += 1
-                slot_list += "\nReply with slot number to confirm." + MENU_HINT
-                reply     = slot_list
-                new_state = "awaiting_slot"
-                new_temp  = {
+                morning_online = [s for s, sess in available_full if sess == "morning"]
+                evening_online = [s for s, sess in available_full if sess != "morning"]
+                base_slot_temp = {
                     "booking_date":    booking_date,
                     "parsed_date":     parsed_date,
                     "available_slots": available,
@@ -777,6 +872,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     "booking_name":    booking_name,
                     "consult_type":    "online",
                 }
+                new_state, new_temp = await send_session_or_slot_ui(
+                    from_number, morning_online, evening_online,
+                    parsed_date, booking_name, base_slot_temp,
+                )
         else:
             # ── In-clinic slot generation ─────────────────────────────
             av = get_availability_for_date(doctor_id, parsed_date)
@@ -808,25 +907,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     reply     = f"Sorry! No slots available on {booking_date}. Please try another date."
                     new_state = "idle"
                 else:
-                    morning_slots = [s for s in available_full if s["session"] == "morning"]
-                    evening_slots = [s for s in available_full if s["session"] == "evening"]
-
-                    slot_list = f"🏥 Available slots on {booking_date}:\n"
-                    idx = 1
-                    if morning_slots:
-                        slot_list += "\n🌅 Morning\n"
-                        for s in morning_slots:
-                            slot_list += f"{idx}. {format_time(s['time'])}\n"
-                            idx += 1
-                    if evening_slots:
-                        slot_list += "\n🌆 Evening\n"
-                        for s in evening_slots:
-                            slot_list += f"{idx}. {format_time(s['time'])}\n"
-                            idx += 1
-                    slot_list += "\nReply with slot number to confirm." + MENU_HINT
-                    reply     = slot_list
-                    new_state = "awaiting_slot"
-                    new_temp  = {
+                    morning_time = [s["time"] for s in available_full if s["session"] == "morning"]
+                    evening_time = [s["time"] for s in available_full if s["session"] == "evening"]
+                    base_slot_temp = {
                         "booking_date":    booking_date,
                         "parsed_date":     parsed_date,
                         "available_slots": available,
@@ -834,6 +917,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         "booking_name":    booking_name,
                         "consult_type":    "in_clinic",
                     }
+                    new_state, new_temp = await send_session_or_slot_ui(
+                        from_number, morning_time, evening_time,
+                        parsed_date, booking_name, base_slot_temp,
+                    )
 
     # ── SLOT SELECTED ─────────────────────────────────────────
     elif intent == "slot_selected":
@@ -1017,6 +1104,61 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         except (IndexError, ValueError):
             reply     = "Invalid choice. Please reply with a number from the list."
             new_state = "awaiting_slot"
+            new_temp  = temp_data
+
+    # ── SESSION TEXT INPUT (in awaiting_session_selection) ────────
+    elif intent == "session_text_input":
+        if t in ["1", "morning"]:
+            session = "morning"
+            slots   = temp_data.get("morning_slots", [])
+        elif t in ["2", "evening"]:
+            session = "evening"
+            slots   = temp_data.get("evening_slots", [])
+        else:
+            reply     = "Please tap 🌅 Morning or 🌙 Evening above, or reply 1 for Morning or 2 for Evening."
+            new_state = current_state
+            new_temp  = temp_data
+            save_conversation_state(from_number, new_state, new_temp)
+            return reply
+        if not slots:
+            reply     = f"Sorry, no {session} slots available. Please choose another date or reply MENU."
+            new_state = "idle"
+        else:
+            parsed_date  = temp_data.get("parsed_date", "")
+            booking_name = temp_data.get("booking_name", patient_name)
+            await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
+            new_state = "awaiting_slot_selection"
+            new_temp  = {**temp_data, "session": session}
+
+    # ── SLOT TEXT INPUT (in awaiting_slot_selection) ──────────
+    elif intent == "slot_text_input":
+        reply     = "Please tap a slot from the list above, or reply MENU to start over."
+        new_state = current_state
+        new_temp  = temp_data
+
+    # ── SLOT CONFIRM TEXT INPUT (in awaiting_slot_confirmation) ──
+    elif intent == "slot_confirm_text_input":
+        pending_slot = temp_data.get("pending_slot", "")
+        if t in ["yes", "confirm", "ok", "y"] and pending_slot:
+            available = temp_data.get("available_slots", [])
+            try:
+                idx = available.index(pending_slot)
+                save_conversation_state(from_number, "awaiting_slot", temp_data)
+                return await handle_message(from_number, str(idx + 1), to_number)
+            except ValueError:
+                reply     = "Could not find that slot. Reply MENU to start over."
+                new_state = "idle"
+        elif t in ["no", "cancel", "n"]:
+            session      = temp_data.get("session", "morning")
+            parsed_date  = temp_data.get("parsed_date", "")
+            booking_name = temp_data.get("booking_name", patient_name)
+            slots        = temp_data.get(f"{session}_slots", [])
+            await send_slot_list(from_number, slots, parsed_date, session, 0, booking_name)
+            new_state = "awaiting_slot_selection"
+            new_temp  = temp_data
+        else:
+            reply     = "Please tap ✅ Confirm or ❌ Cancel above."
+            new_state = current_state
             new_temp  = temp_data
 
     # ── QUEUE STATUS ──────────────────────────────────────────
