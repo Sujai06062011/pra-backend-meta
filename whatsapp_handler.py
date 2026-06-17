@@ -343,42 +343,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── BOOK APPOINTMENT — unified flow ───────────────────────
     elif intent == "book":
         all_patients = get_all_linked_patients(from_number)
-        if len(all_patients) == 1:
-            # Only one patient — skip selection, go straight to date
-            p = all_patients[0]
-            today     = date.today()
-            tomorrow  = date.fromordinal(today.toordinal() + 1)
-            day_after = date.fromordinal(today.toordinal() + 2)
-            fmt = "%d %B %Y"
-            reply = (
-                f"📅 Booking appointment for *{p['name']}*\n\n"
-                f"Which date?\n\n"
-                f"1. Today ({today.strftime(fmt)})\n"
-                f"2. Tomorrow ({tomorrow.strftime(fmt)})\n"
-                f"3. Day after ({day_after.strftime(fmt)})\n"
-                f"4. Other date (reply with date e.g. 15 June 2026)"
-                + MENU_HINT
-            )
-            new_state = "awaiting_booking_date"
-            new_temp  = {
-                "booking_for": p["id"],
-                "booking_name": p["name"],
-                "date_options": [
-                    today.strftime("%Y-%m-%d"),
-                    tomorrow.strftime("%Y-%m-%d"),
-                    day_after.strftime("%Y-%m-%d"),
-                ],
-                "date_labels": [
-                    today.strftime(fmt),
-                    tomorrow.strftime(fmt),
-                    day_after.strftime(fmt),
-                ],
-            }
-        else:
-            # Multiple patients — show selection list
-            reply     = build_patient_select_msg(all_patients)
-            new_state = "awaiting_booking_patient_select"
-            new_temp  = {"booking_patients": all_patients}
+        reply     = build_patient_select_msg(all_patients)
+        new_state = "awaiting_booking_patient_select"
+        new_temp  = {"booking_patients": all_patients}
 
     # ── PATIENT SELECTED for booking ──────────────────────────
     elif intent == "booking_patient_selected":
