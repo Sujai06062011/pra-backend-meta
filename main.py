@@ -239,6 +239,21 @@ async def send_meta_template(to_number: str, template_name: str, lang_code: str 
         return r.json()
 
 
+async def handle_date_selected(from_number: str, date_str: str, clinic_number: str = ""):
+    """Translate a date_today_* / date_tomorrow_* button tap into the existing date flow."""
+    _, temp_data = get_conversation_state(from_number)
+    date_options = temp_data.get("date_options", [])
+    try:
+        idx = date_options.index(date_str)
+        synthetic_text = str(idx + 1)  # "1" for today, "2" for tomorrow
+    except ValueError:
+        # date not in saved options — pass raw ISO date; parse_date won't handle it,
+        # but the existing handler accepts free text and tries parse_date; this is a fallback
+        synthetic_text = date_str
+    print(f"[DATE SELECTED] {from_number} date={date_str} → '{synthetic_text}'")
+    await handle_inbound_message(from_number, synthetic_text, clinic_number)
+
+
 async def handle_visit_type_selected(from_number: str, visit_type: str, clinic_number: str = ""):
     """Translate a visit_in_clinic / visit_online button tap into the existing consult-type flow."""
     visit_text = "1" if visit_type == "in_clinic" else "2"
@@ -412,7 +427,24 @@ async def meta_webhook_inbound(request: Request):
                     action = parts[0]
                     followup_id = parts[1] if len(parts) > 1 else None
 
-                    if button_id in ("visit_in_clinic", "visit_online"):
+                    if button_id.startswith("date_"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state != "awaiting_booking_date":
+                            print(f"[STALE] date button ignored, state={current_state}")
+                            await send_meta_text(from_number,
+                                "Your booking is already in progress.\n"
+                                "Reply MENU to start over or continue your booking.")
+                        elif button_id == "date_other":
+                            await send_meta_text(from_number,
+                                "Please type your preferred date:\n"
+                                "(e.g. 20 Jun 2026)")
+                            # state stays awaiting_booking_date; patient types date → parse_date handles it
+                        else:
+                            # date_today_2026-06-17 or date_tomorrow_2026-06-18
+                            date_str = button_id.split("_")[-1]  # "2026-06-17"
+                            await handle_date_selected(from_number, date_str, clinic_number)
+
+                    elif button_id in ("visit_in_clinic", "visit_online"):
                         current_state, _ = get_conversation_state(from_number)
                         if current_state != "awaiting_consult_type":
                             print(f"[STALE] visit_type button ignored, state={current_state}")

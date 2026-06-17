@@ -106,6 +106,33 @@ def build_date_options(name_label: str = "") -> tuple:
     )
 
 
+async def send_date_selection_interactive(
+    from_number: str,
+    name_label: str,
+    date_opts: list,
+) -> None:
+    """Send date selection as 3 reply buttons: Today, Tomorrow, Other Date."""
+    today     = date.today()
+    tomorrow  = date.fromordinal(today.toordinal() + 1)
+    months    = ["Jan","Feb","Mar","Apr","May","Jun",
+                 "Jul","Aug","Sep","Oct","Nov","Dec"]
+    first_name = name_label.split()[0] if name_label else "you"
+
+    today_title    = f"Today {today.day} {months[today.month-1]}"
+    tomorrow_title = f"Tomorrow {tomorrow.day} {months[tomorrow.month-1]}"
+
+    await send_meta_buttons(
+        to_number=from_number,
+        body_text=f"📅 Booking for {first_name}\n\nWhich date?",
+        buttons=[
+            {"id": f"date_today_{date_opts[0]}",    "title": today_title[:20]},
+            {"id": f"date_tomorrow_{date_opts[1]}", "title": tomorrow_title[:20]},
+            {"id": "date_other",                     "title": "Other Date"},
+        ],
+        footer_text="Tap Other Date to choose a different day",
+    )
+
+
 def parse_date(text: str):
     lower = text.lower()
     day = None
@@ -509,8 +536,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     new_state = "awaiting_consult_type"
                     new_temp  = base_temp
                 else:
-                    date_reply, date_opts, date_labels = build_date_options(p["name"])
-                    reply     = date_reply
+                    _, date_opts, date_labels = build_date_options(p["name"])
+                    await send_date_selection_interactive(from_number, p["name"], date_opts)
                     new_state = "awaiting_booking_date"
                     new_temp  = {**base_temp, "consult_type": "in_clinic",
                                  "date_options": date_opts, "date_labels": date_labels}
@@ -631,8 +658,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             new_state = "awaiting_consult_type"
             new_temp  = base_temp
         else:
-            date_reply, date_opts, date_labels = build_date_options(raw_name)
-            reply     = reg_msg + date_reply
+            _, date_opts, date_labels = build_date_options(raw_name)
+            await send_whatsapp_text(from_number, reg_msg)
+            await send_date_selection_interactive(from_number, raw_name, date_opts)
             new_state = "awaiting_booking_date"
             new_temp  = {**base_temp, "consult_type": "in_clinic",
                          "date_options": date_opts, "date_labels": date_labels}
@@ -651,8 +679,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             new_temp  = temp_data
             save_conversation_state(from_number, new_state, new_temp)
             return reply
-        date_reply, date_opts, date_labels = build_date_options(booking_name)
-        reply     = date_reply
+        _, date_opts, date_labels = build_date_options(booking_name)
+        await send_date_selection_interactive(from_number, booking_name, date_opts)
         new_state = "awaiting_booking_date"
         new_temp  = {
             "booking_for":   booking_for,
