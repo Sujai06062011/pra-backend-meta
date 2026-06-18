@@ -1177,7 +1177,12 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             else:
                 # In-clinic: token is always server-assigned
                 token = assign_token_for_slot(doctor_id, parsed_date, selected_slot)
-                appt_row = create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+                try:
+                    appt_row = create_appointment(booking_for, doctor_id, parsed_date, selected_slot, token)
+                except Exception as _ce:
+                    print(f"⚠️ create_appointment failed: {_ce}")
+                    save_conversation_state(from_number, "awaiting_slot_selection", temp_data)
+                    return "Sorry, there was an error booking your appointment. Please try selecting your slot again."
                 appt_id  = appt_row["id"] if appt_row else None
 
                 display_tok = get_display_token(token, selected_slot)
