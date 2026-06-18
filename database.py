@@ -325,7 +325,7 @@ def create_appointment(patient_id: str, doctor_id: str, date_str: str,
             ensure_queue_session(doctor_id, date_str)
             return result.data[0] if result.data else None
         except _APIError as _e:
-            if str(_e.args[0].get("code", "")) == "23505" and _attempt < 2:
+            if _e.code == "23505" and _attempt < 2:
                 print(f"⚠️ Token {_token} collision on attempt {_attempt+1}, retrying…")
                 continue
             raise
