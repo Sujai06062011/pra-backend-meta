@@ -309,17 +309,27 @@ def create_appointment(patient_id: str, doctor_id: str, date_str: str,
             }).eq("id", cancelled.data[0]["id"]).execute()
             return result.data[0] if result.data else None
 
-    result = supabase.table("appointments").insert({
-        "patient_id": patient_id,
-        "doctor_id": doctor_id,
-        "appointment_date": date_str,
-        "appointment_time": t,
-        "token_number": token,
-        "status": "Confirmed",
-        "booking_source": booking_source
-    }).execute()
-    ensure_queue_session(doctor_id, date_str)
-    return result.data[0] if result.data else None
+    from postgrest.exceptions import APIError as _APIError
+    for _attempt in range(3):
+        _token = assign_token_for_slot(doctor_id, date_str, t) if _attempt > 0 else token
+        try:
+            result = supabase.table("appointments").insert({
+                "patient_id": patient_id,
+                "doctor_id": doctor_id,
+                "appointment_date": date_str,
+                "appointment_time": t,
+                "token_number": _token,
+                "status": "Confirmed",
+                "booking_source": booking_source
+            }).execute()
+            ensure_queue_session(doctor_id, date_str)
+            return result.data[0] if result.data else None
+        except _APIError as _e:
+            if str(_e.args[0].get("code", "")) == "23505" and _attempt < 2:
+                print(f"⚠️ Token {_token} collision on attempt {_attempt+1}, retrying…")
+                continue
+            raise
+    return None
 
 
 def create_online_appointment(patient_id: str, doctor_id: str, date_str: str,
