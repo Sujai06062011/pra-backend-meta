@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi_mcp import FastApiMCP
+from mcp_tools import create_parro_mcp_server
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
@@ -122,8 +124,11 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://pra-frontend.vercel.app",  # ADD THIS
-        "https://pra-frontend-sujai06062011.vercel.app"  # ADD THIS
+        "https://pra-frontend.vercel.app",
+        "https://pra-frontend-sujai06062011.vercel.app",
+        "https://www.anthropic.com",
+        "https://api.anthropic.com",
+        "https://claude.ai",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -133,6 +138,36 @@ app.add_middleware(
 app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
+
+# ── MCP HTTP Transport ────────────────────────────────────────────────────────
+_mcp_server = create_parro_mcp_server(supabase)
+_fastapi_mcp = FastApiMCP(
+    _mcp_server,
+    name="Parro Connect Clinic MCP",
+    base_url="https://web-production-a0717.up.railway.app",
+    describe_all_responses=True,
+    describe_full_response_schema=True,
+)
+_fastapi_mcp.mount(app)
+# MCP endpoint: /mcp
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/mcp-info")
+async def mcp_info():
+    """Returns MCP server connection details for remote clients."""
+    return {
+        "name": "Parro Connect Clinic MCP",
+        "version": "1.0.0",
+        "mcp_endpoint": "https://web-production-a0717.up.railway.app/mcp",
+        "tools": [
+            "get_clinic_info", "get_patient", "register_patient",
+            "get_available_slots", "book_appointment", "get_queue_status",
+            "get_upcoming_appointments", "cancel_appointment", "add_family_member"
+        ],
+        "transport": "HTTP (SSE)",
+        "status": "active"
+    }
 
 # ── META CLOUD API (WhatsApp) ─────────────────────────────
 META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
