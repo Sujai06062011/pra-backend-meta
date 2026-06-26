@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, PlainTextResponse
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+import asyncio
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from mcp_tools import create_parro_mcp_server
 from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
@@ -139,20 +139,107 @@ app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
 
-# ── MCP HTTP Transport (Streamable HTTP) ─────────────────────────────────────
+# ── MCP HTTP Transport ────────────────────────────────────────────────────────
 _mcp_server = create_parro_mcp_server(supabase)
-_mcp_session_manager = StreamableHTTPSessionManager(
-    app=_mcp_server,
-    stateless=True,
-)
+
+_MCP_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+}
 
 
-@app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
-async def mcp_endpoint(request: Request):
-    """Streamable HTTP MCP endpoint — handles all MCP protocol messages."""
-    return await _mcp_session_manager.handle_request(
-        request.scope, request.receive, request._send
-    )
+@app.middleware("http")
+async def add_mcp_cors(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/mcp"):
+        for k, v in _MCP_CORS_HEADERS.items():
+            response.headers[k] = v
+    return response
+
+
+@app.options("/mcp")
+async def mcp_options():
+    return Response(status_code=200, headers=_MCP_CORS_HEADERS)
+
+
+@app.get("/mcp")
+async def mcp_get(request: Request):
+    """GET /mcp — SSE stream for clients that want it, JSON info otherwise."""
+    if "text/event-stream" in request.headers.get("accept", ""):
+        async def event_stream():
+            yield f"data: {json.dumps({'type': 'connection', 'status': 'connected'})}\n\n"
+            while True:
+                await asyncio.sleep(30)
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                     "X-Accel-Buffering": "no"},
+        )
+    return {
+        "name": "parro-connect-clinic",
+        "version": "1.0.0",
+        "protocol": "mcp",
+        "capabilities": {"tools": {}},
+    }
+
+
+@app.post("/mcp")
+async def mcp_post(request: Request):
+    """POST /mcp — JSON-RPC 2.0 handler for MCP protocol messages."""
+    body = await request.json()
+    method = body.get("method", "")
+    msg_id = body.get("id", 1)
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "parro-connect-clinic", "version": "1.0.0"},
+            },
+        }
+
+    elif method == "tools/list":
+        tools = await _mcp_server._direct_list_tools()
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "tools": [
+                    {"name": t.name, "description": t.description,
+                     "inputSchema": t.inputSchema}
+                    for t in tools
+                ]
+            },
+        }
+
+    elif method == "tools/call":
+        params = body.get("params", {})
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        result = await _mcp_server._direct_call_tool(tool_name, arguments)
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "content": [{"type": "text", "text": r.text} for r in result]
+            },
+        }
+
+    elif method == "notifications/initialized":
+        return Response(status_code=200)
+
+    else:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        }
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -165,10 +252,10 @@ async def mcp_info():
         "tools": [
             "get_clinic_info", "get_patient", "register_patient",
             "get_available_slots", "book_appointment", "get_queue_status",
-            "get_upcoming_appointments", "cancel_appointment", "add_family_member"
+            "get_upcoming_appointments", "cancel_appointment", "add_family_member",
         ],
-        "transport": "Streamable HTTP",
-        "status": "active"
+        "transport": "HTTP JSON-RPC",
+        "status": "active",
     }
 
 
@@ -177,17 +264,14 @@ async def mcp_routes():
     routes = []
     for route in app.routes:
         if hasattr(route, "path"):
-            routes.append({
-                "path": route.path,
-                "methods": list(getattr(route, "methods", []))
-            })
+            routes.append({"path": route.path,
+                           "methods": list(getattr(route, "methods", []))})
     return {"routes": routes}
 
 
 @app.post("/mcp-call")
 async def mcp_call(request: Request):
-    """Direct tool call — bypasses MCP protocol for easy testing."""
-    import json
+    """Direct tool call — bypasses MCP protocol for easy curl testing."""
     body = await request.json()
     tool_name = body.get("tool")
     arguments = body.get("arguments", {})
