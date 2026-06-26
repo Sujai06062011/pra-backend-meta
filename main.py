@@ -604,19 +604,34 @@ async def download_meta_media(media_id: str) -> bytes:
 
 
 async def transcribe_audio(audio_bytes: bytes, language_code: str = "ta") -> str:
-    sarvam_key = os.getenv("SARVAM_API_KEY")
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://api.sarvam.ai/speech-to-text",
-            headers={"API-Subscription-Key": sarvam_key},
-            files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-            data={"model": "saarika:v2", "language_code": language_code},
-            timeout=30.0,
-        )
-    result = resp.json()
-    transcript = result.get("transcript", "")
-    print(f"[STT] Transcribed: {transcript}")
-    return transcript
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_key:
+        print("[STT ERROR] GROQ_API_KEY not set")
+        return ""
+
+    lang_map = {"ta": "ta", "hi": "hi", "en": "en", "te": "te", "kn": "kn", "ml": "ml"}
+    whisper_lang = lang_map.get(language_code, "ta")
+    print(f"[STT] Audio: {len(audio_bytes)} bytes, lang: {whisper_lang}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+                data={"model": "whisper-large-v3", "language": whisper_lang,
+                      "response_format": "text"},
+            )
+        print(f"[STT] Status: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"[STT ERROR] {resp.text[:200]}")
+            return ""
+        transcript = resp.text.strip()
+        print(f"[STT] Transcript: '{transcript}'")
+        return transcript
+    except Exception as e:
+        print(f"[STT EXCEPTION] {e}")
+        return ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 
