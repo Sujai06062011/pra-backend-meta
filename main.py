@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from mcp.server.sse import SseServerTransport
+from fastapi.responses import JSONResponse, PlainTextResponse
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp_tools import create_parro_mcp_server
-from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
 from routers.schedule import router as schedule_router
@@ -139,27 +139,18 @@ app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
 
-# ── MCP HTTP Transport (SSE) ──────────────────────────────────────────────────
+# ── MCP HTTP Transport (Streamable HTTP) ─────────────────────────────────────
 _mcp_server = create_parro_mcp_server(supabase)
-_sse_transport = SseServerTransport("/mcp/messages")
+_mcp_session_manager = StreamableHTTPSessionManager(
+    app=_mcp_server,
+    stateless=True,
+)
 
 
-@app.get("/mcp")
-async def mcp_sse_endpoint(request: Request):
-    """SSE endpoint — MCP clients connect here to receive events."""
-    async with _sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await _mcp_server.run(
-            streams[0], streams[1],
-            _mcp_server.create_initialization_options()
-        )
-
-
-@app.post("/mcp/messages")
-async def mcp_post_messages(request: Request):
-    """POST endpoint — MCP clients send tool calls here."""
-    await _sse_transport.handle_post_message(
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
+async def mcp_endpoint(request: Request):
+    """Streamable HTTP MCP endpoint — handles all MCP protocol messages."""
+    return await _mcp_session_manager.handle_request(
         request.scope, request.receive, request._send
     )
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,20 +158,45 @@ async def mcp_post_messages(request: Request):
 
 @app.get("/mcp-info")
 async def mcp_info():
-    """Returns MCP server connection details for remote clients."""
     return {
         "name": "Parro Connect Clinic MCP",
         "version": "1.0.0",
-        "mcp_sse_endpoint": "https://web-production-a0717.up.railway.app/mcp",
-        "mcp_post_endpoint": "https://web-production-a0717.up.railway.app/mcp/messages",
+        "mcp_endpoint": "https://web-production-a0717.up.railway.app/mcp",
         "tools": [
             "get_clinic_info", "get_patient", "register_patient",
             "get_available_slots", "book_appointment", "get_queue_status",
             "get_upcoming_appointments", "cancel_appointment", "add_family_member"
         ],
-        "transport": "HTTP SSE",
+        "transport": "Streamable HTTP",
         "status": "active"
     }
+
+
+@app.get("/mcp-routes")
+async def mcp_routes():
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "path"):
+            routes.append({
+                "path": route.path,
+                "methods": list(getattr(route, "methods", []))
+            })
+    return {"routes": routes}
+
+
+@app.post("/mcp-call")
+async def mcp_call(request: Request):
+    """Direct tool call — bypasses MCP protocol for easy testing."""
+    import json
+    body = await request.json()
+    tool_name = body.get("tool")
+    arguments = body.get("arguments", {})
+    try:
+        result = await _mcp_server._direct_call_tool(tool_name, arguments)
+        text = result[0].text if result else "{}"
+        return json.loads(text)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # ── META CLOUD API (WhatsApp) ─────────────────────────────
 META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")

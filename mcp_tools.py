@@ -714,4 +714,5 @@ def create_parro_mcp_server(supabase_client) -> Server:
             traceback.print_exc()
             return err(f"Tool execution failed: {str(e)}")
 
+    server._direct_call_tool = call_tool
     return server
