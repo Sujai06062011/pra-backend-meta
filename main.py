@@ -282,6 +282,17 @@ async def mcp_call(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+@app.post("/test/voice-transcribe")
+async def test_voice_transcribe(request: Request):
+    """Test endpoint: download a Meta media file and transcribe it via Sarvam."""
+    body = await request.json()
+    media_id = body.get("media_id")
+    lang = body.get("language", "ta")
+    audio = await download_meta_media(media_id)
+    transcript = await transcribe_audio(audio, lang)
+    return {"media_id": media_id, "language": lang, "transcript": transcript}
+
 # ── META CLOUD API (WhatsApp) ─────────────────────────────
 META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
@@ -574,6 +585,42 @@ async def whatsapp_verify(request: Request):
     return PlainTextResponse(challenge)
 
 
+# ── Voice note helpers ────────────────────────────────────────────────────────
+
+async def download_meta_media(media_id: str) -> bytes:
+    token = os.getenv("META_ACCESS_TOKEN")
+    version = os.getenv("META_API_VERSION", "v18.0")
+    async with httpx.AsyncClient() as client:
+        url_resp = await client.get(
+            f"https://graph.facebook.com/{version}/{media_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        media_url = url_resp.json()["url"]
+        audio_resp = await client.get(
+            media_url,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return audio_resp.content
+
+
+async def transcribe_audio(audio_bytes: bytes, language_code: str = "ta") -> str:
+    sarvam_key = os.getenv("SARVAM_API_KEY")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.sarvam.ai/speech-to-text",
+            headers={"API-Subscription-Key": sarvam_key},
+            files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+            data={"model": "saarika:v2", "language_code": language_code},
+            timeout=30.0,
+        )
+    result = resp.json()
+    transcript = result.get("transcript", "")
+    print(f"[STT] Transcribed: {transcript}")
+    return transcript
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @app.get("/webhook/meta")
 async def meta_webhook_verify(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -610,6 +657,43 @@ async def meta_webhook_inbound(request: Request):
             text = msg["text"]["body"].strip()
             print(f"[Meta TEXT IN] from={from_number} text={text}")
             await handle_inbound_message(from_number, text, clinic_number)
+
+        elif msg_type == "audio":
+            try:
+                audio_id = msg["audio"]["id"]
+
+                # Detect patient language for STT
+                patient_lang = "ta"
+                try:
+                    lang_result = supabase.table("patients")\
+                        .select("language")\
+                        .eq("mobile", from_number)\
+                        .eq("doctor_id", "8c33abe0-5d2e-4613-9437-c7c375e8d162")\
+                        .limit(1).execute()
+                    if lang_result.data:
+                        lang = lang_result.data[0].get("language", "tamil").lower()
+                        patient_lang = {"tamil": "ta", "hindi": "hi", "english": "en"}.get(lang, "ta")
+                except Exception:
+                    pass
+
+                audio_bytes = await download_meta_media(audio_id)
+                transcript = await transcribe_audio(audio_bytes, patient_lang)
+
+                if not transcript:
+                    await send_meta_text(
+                        from_number,
+                        "மன்னிக்கவும், உங்கள் குரல் கேட்கவில்லை. மீண்டும் பேசவும் அல்லது தட்டச்சு செய்யவும்.\n\n"
+                        "Sorry, could not hear you clearly. Please try again or type your message.",
+                    )
+                else:
+                    print(f"[VOICE] {from_number} said: {transcript}")
+                    await handle_inbound_message(from_number, transcript, clinic_number)
+            except Exception as e:
+                print(f"[VOICE ERROR] {e}")
+                await send_meta_text(
+                    from_number,
+                    "Voice note processing failed. Please type your message instead.",
+                )
 
         elif msg_type == "interactive":
             interactive_type = msg["interactive"].get("type", "button_reply")
