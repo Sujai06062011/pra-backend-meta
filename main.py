@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi_mcp import FastApiMCP
+from mcp.server.sse import SseServerTransport
 from mcp_tools import create_parro_mcp_server
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -139,17 +139,29 @@ app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
 
-# ── MCP HTTP Transport ────────────────────────────────────────────────────────
+# ── MCP HTTP Transport (SSE) ──────────────────────────────────────────────────
 _mcp_server = create_parro_mcp_server(supabase)
-_fastapi_mcp = FastApiMCP(
-    _mcp_server,
-    name="Parro Connect Clinic MCP",
-    base_url="https://web-production-a0717.up.railway.app",
-    describe_all_responses=True,
-    describe_full_response_schema=True,
-)
-_fastapi_mcp.mount(app)
-# MCP endpoint: /mcp
+_sse_transport = SseServerTransport("/mcp/messages")
+
+
+@app.get("/mcp")
+async def mcp_sse_endpoint(request: Request):
+    """SSE endpoint — MCP clients connect here to receive events."""
+    async with _sse_transport.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await _mcp_server.run(
+            streams[0], streams[1],
+            _mcp_server.create_initialization_options()
+        )
+
+
+@app.post("/mcp/messages")
+async def mcp_post_messages(request: Request):
+    """POST endpoint — MCP clients send tool calls here."""
+    await _sse_transport.handle_post_message(
+        request.scope, request.receive, request._send
+    )
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -159,13 +171,14 @@ async def mcp_info():
     return {
         "name": "Parro Connect Clinic MCP",
         "version": "1.0.0",
-        "mcp_endpoint": "https://web-production-a0717.up.railway.app/mcp",
+        "mcp_sse_endpoint": "https://web-production-a0717.up.railway.app/mcp",
+        "mcp_post_endpoint": "https://web-production-a0717.up.railway.app/mcp/messages",
         "tools": [
             "get_clinic_info", "get_patient", "register_patient",
             "get_available_slots", "book_appointment", "get_queue_status",
             "get_upcoming_appointments", "cancel_appointment", "add_family_member"
         ],
-        "transport": "HTTP (SSE)",
+        "transport": "HTTP SSE",
         "status": "active"
     }
 
