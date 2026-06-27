@@ -195,12 +195,14 @@ def get_slot_config() -> dict:
     return data
 
 
-def get_display_token(token_number, appointment_time, all_day_appointments=None) -> str:
+def get_display_token(token_number, appointment_time, all_day_appointments=None, *, date_str: str = None, doctor_id: str = None) -> str:
     """Slot-position display token: every time slot maps to a FIXED token in its
     session — morning start → M1, next slot → M2 …, evening start → E1, etc.
     Position = (slot time − session start) / slot duration, so changing the
     per-patient minutes in clinic config re-maps tokens automatically.
-    DB token_number stays an integer; this is display-only, never stored."""
+    DB token_number stays an integer; this is display-only, never stored.
+    Pass date_str + doctor_id to use the per-date session start from clinic_availability
+    (overrides clinic_config defaults when a date-specific schedule exists)."""
     t = _time_str(appointment_time)
     if not t:
         return f"#{token_number}" if token_number else "?"
@@ -209,6 +211,19 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None)
     cfg = get_slot_config()
     start = cfg["evening_start"] if is_evening else cfg["morning_start"]
     prefix = "E" if is_evening else "M"
+
+    if date_str and doctor_id:
+        try:
+            res = supabase.table("clinic_availability").select(
+                "morning_start, evening_start"
+            ).eq("doctor_id", doctor_id).eq("availability_date", date_str).limit(1).execute()
+            if res.data:
+                row = res.data[0]
+                per_start = row.get("evening_start" if is_evening else "morning_start")
+                if per_start:
+                    start = _time_str(per_start)[:5]
+        except Exception:
+            pass
 
     def _mins(x):
         return int(x[:2]) * 60 + int(x[3:5])

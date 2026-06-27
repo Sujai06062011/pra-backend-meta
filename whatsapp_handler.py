@@ -246,7 +246,8 @@ def _format_appt_row_description(appt: dict) -> str:
     if time_str:
         parts.append(format_time(time_str))
     if token_num:
-        d_tok = get_display_token(token_num, appt.get("appointment_time", ""))
+        d_tok = get_display_token(token_num, appt.get("appointment_time", ""),
+                                   doctor_id=appt.get("doctor_id"), date_str=date_str)
         parts.append(f"Token {d_tok}")
     return " · ".join(parts)[:72]
 
@@ -263,7 +264,9 @@ async def send_cancel_appointment_list(
         body_lines = ["Your upcoming appointments:\n"]
         for i, appt in enumerate(appointments, 1):
             token_num = appt.get("token_number", "")
-            d_tok = get_display_token(token_num, appt.get("appointment_time", "")) if token_num else ""
+            d_tok = get_display_token(token_num, appt.get("appointment_time", ""),
+                                       doctor_id=appt.get("doctor_id"),
+                                       date_str=str(appt.get("appointment_date", ""))[:10]) if token_num else ""
             appt_with_tok = {**appt, "display_token": d_tok}
             buttons.append({
                 "id": f"cancel_{appt['id']}",
@@ -1134,7 +1137,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             if existing:
                 ex_time = format_time(_time_str(existing.get("appointment_time"))[:5])
                 ex_tok = get_display_token(
-                    existing.get("token_number"), existing.get("appointment_time")
+                    existing.get("token_number"), existing.get("appointment_time"),
+                    doctor_id=doctor_id, date_str=parsed_date,
                 )
                 reply = (
                     f"{booking_name} already has an appointment on {booking_date} "
@@ -1230,7 +1234,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     return "Sorry, there was an error booking your appointment. Please try selecting your slot again."
                 appt_id  = appt_row["id"] if appt_row else None
 
-                display_tok = get_display_token(token, selected_slot)
+                display_tok = get_display_token(token, selected_slot, doctor_id=doctor_id, date_str=parsed_date)
 
                 try:
                     _pc = _supa.table("patients").select("patient_code").eq("id", booking_for).single().execute()
@@ -1425,7 +1429,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     return (a.get("patients") or {}).get("name", "Patient")
 
                 def disp(a):
-                    return get_display_token(a.get("token_number"), a.get("appointment_time"))
+                    return get_display_token(a.get("token_number"), a.get("appointment_time"),
+                                             doctor_id=a.get("doctor_id"),
+                                             date_str=str(a.get("appointment_date", ""))[:10])
 
                 def t_of(a):
                     return _time_str(a.get("appointment_time"))
@@ -1543,7 +1549,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
                 token_str = ""
                 if apt.get("token_number"):
-                    d_tok = get_display_token(apt["token_number"], apt["appointment_time"])
+                    d_tok = get_display_token(apt["token_number"], apt["appointment_time"],
+                                              doctor_id=apt.get("doctor_id"),
+                                              date_str=str(apt.get("appointment_date", ""))[:10])
                     token_str = f" (Token {d_tok})"
 
                 cancel_appointment(apt["id"])

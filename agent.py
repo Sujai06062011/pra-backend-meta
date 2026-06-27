@@ -205,7 +205,7 @@ def _tool_book_appointment(patient_id: str, date_str: str, time_str: str) -> dic
     if not appt:
         return {"success": False, "reason": "Booking failed — please try again"}
 
-    display_tok = get_display_token(token, time_str)
+    display_tok = get_display_token(token, time_str, doctor_id=DEFAULT_DOCTOR_ID, date_str=date_str)
     pat_res = supa.table("patients").select("name, patient_code").eq("id", patient_id).single().execute()
     pat_name = (pat_res.data or {}).get("name", "Patient")
     pat_code = (pat_res.data or {}).get("patient_code", "")
@@ -230,7 +230,9 @@ def _tool_get_upcoming_appointments(mobile: str) -> dict:
             "patient_name": a.get("patient_name") or a.get("name", ""),
             "date": str(a.get("appointment_date", ""))[:10],
             "time": str(a.get("appointment_time", ""))[:5],
-            "token": get_display_token(a.get("token_number"), a.get("appointment_time")),
+            "token": get_display_token(a.get("token_number"), a.get("appointment_time"),
+                                        doctor_id=DEFAULT_DOCTOR_ID,
+                                        date_str=str(a.get("appointment_date", ""))[:10]),
             "status": a.get("status", ""),
         }
         for a in appts
@@ -287,7 +289,8 @@ def _tool_get_queue_status(mobile: str) -> dict:
     results = []
     for a in (appts.data or []):
         t = _time_str(a.get("appointment_time"))
-        display_tok = get_display_token(a.get("token_number"), a.get("appointment_time"))
+        display_tok = get_display_token(a.get("token_number"), a.get("appointment_time"),
+                                         doctor_id=DEFAULT_DOCTOR_ID, date_str=today)
         pat_name = (a.get("patients") or {}).get("name", "Patient")
         if a.get("status") == "In Progress":
             status_msg = "Now being seen"
