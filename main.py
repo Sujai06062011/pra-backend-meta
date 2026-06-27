@@ -790,6 +790,13 @@ async def meta_webhook_inbound(request: Request):
                             "Reply MENU to start over or continue your booking.")
                     else:
                         await handle_member_interactive(from_number, list_id, clinic_number)
+                elif list_id.startswith("doctor_"):
+                    # multi-doctor: pass the raw list_id as text so doctor_selected intent can parse it
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_doctor_select":
+                        print(f"[STALE] doctor list ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, list_id, clinic_number)
                 else:
                     list_id_to_text = {
                         "menu_book_appointment":  "1",
