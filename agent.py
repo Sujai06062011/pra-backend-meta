@@ -447,6 +447,44 @@ def _dispatch_tool(name: str, inputs: dict) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+# ── History validation ────────────────────────────────────────────────────────
+
+def _validate_history(history: list) -> list:
+    """
+    Remove any trailing tool_result messages whose tool_use blocks are missing.
+    Also drops orphaned tool_use blocks with no following tool_result.
+    Returns a clean history safe to send to the Anthropic API.
+    """
+    if not history:
+        return history
+
+    # Collect all tool_use IDs present in assistant messages
+    tool_use_ids = set()
+    for msg in history:
+        if msg.get("role") == "assistant":
+            for block in (msg.get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_use_ids.add(block["id"])
+
+    # Remove user messages that contain tool_results referencing unknown tool_use IDs
+    clean = []
+    for msg in history:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                filtered = [
+                    b for b in content
+                    if not (isinstance(b, dict) and b.get("type") == "tool_result"
+                            and b.get("tool_use_id") not in tool_use_ids)
+                ]
+                if not filtered:
+                    continue  # drop entire message if all blocks were orphaned results
+                msg = {**msg, "content": filtered}
+        clean.append(msg)
+
+    return clean
+
+
 # ── Content block serialization (for history persistence) ─────────────────────
 
 def _serialize_content(content) -> list:
@@ -495,6 +533,9 @@ async def run_clinic_agent(mobile: str, text: str, doctor: dict) -> str | None:
                 history = []
         except Exception:
             history = []
+
+    # Validate: remove orphaned tool_result blocks that have no matching tool_use
+    history = _validate_history(history)
 
     now_ist = datetime.now(IST)
     today_str = now_ist.date().isoformat()
@@ -551,9 +592,9 @@ RULES:
                 # Save assistant turn to history
                 history.append({"role": "assistant", "content": _serialize_content(response.content)})
 
-                # Trim to MAX_HISTORY_TURNS message pairs
+                # Trim to MAX_HISTORY_TURNS message pairs, then re-validate
                 if len(history) > MAX_HISTORY_TURNS * 2:
-                    history = history[-(MAX_HISTORY_TURNS * 2):]
+                    history = _validate_history(history[-(MAX_HISTORY_TURNS * 2):])
 
                 save_conversation_state(mobile, "agent", {
                     "agent_history": history,
