@@ -494,7 +494,8 @@ async def handle_appointment_cancel(from_number: str, appointment_id: str):
     date_str = str(appt.get("appointment_date", ""))[:10]
     time_str = str(appt.get("appointment_time", ""))[:5]
     token_num = appt.get("token_number", "")
-    d_tok = get_display_token(token_num, appt.get("appointment_time", "")) if token_num else ""
+    d_tok = get_display_token(token_num, appt.get("appointment_time", ""),
+                               doctor_id=appt.get("doctor_id"), date_str=date_str) if token_num else ""
 
     display_date = format_display_date(date_str)
     display_time = format_time(time_str)
@@ -913,7 +914,8 @@ async def meta_webhook_inbound(request: Request):
                             if appt_res.data:
                                 a = appt_res.data
                                 pname = (a.get("patients") or {}).get("name", "Patient")
-                                d_tok = get_display_token(a.get("token_number", ""), a.get("appointment_time", "")) if a.get("token_number") else ""
+                                d_tok = get_display_token(a.get("token_number", ""), a.get("appointment_time", ""),
+                                                           doctor_id=a.get("doctor_id"), date_str=str(a.get("appointment_date", ""))[:10]) if a.get("token_number") else ""
                                 display_date = format_display_date(str(a.get("appointment_date", ""))[:10])
                                 display_time = format_time(str(a.get("appointment_time", ""))[:5])
                                 token_line = f"Token {d_tok}" if d_tok else ""
@@ -1769,7 +1771,8 @@ async def dashboard_stats(doctor_id: str):
     current_display_token = None
     if curr:
         current_display_token = get_display_token(
-            current_token_val, curr.get("appointment_time")
+            current_token_val, curr.get("appointment_time"),
+            doctor_id=doctor_id, date_str=today,
         )
 
     week_map = defaultdict(int)
@@ -2136,7 +2139,8 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
 
     for a in appointments:
         a["display_token"] = get_display_token(
-            a.get("token_number"), a.get("appointment_time")
+            a.get("token_number"), a.get("appointment_time"),
+            doctor_id=a.get("doctor_id"), date_str=str(a.get("appointment_date", ""))[:10],
         ) if a.get("appointment_time") else None
 
         cur, st = serving.get(a.get("appointment_date"), (0, ""))
@@ -2398,7 +2402,8 @@ async def queue_status(doctor_id: str, date: str = ""):
 
     for a in all_appts:
         a["display_token"] = get_display_token(
-            a.get("token_number"), a.get("appointment_time")
+            a.get("token_number"), a.get("appointment_time"),
+            doctor_id=a.get("doctor_id"), date_str=str(a.get("appointment_date", ""))[:10],
         ) if a.get("token_number") else None
 
         t = _time_str(a.get("appointment_time"))
@@ -3685,7 +3690,7 @@ async def book_appointment(request: Request):
     existing = get_active_appointment(patient_id, doctor_id, appt_date)
     if existing:
         ex_time = _time_str(existing.get("appointment_time"))
-        ex_disp = get_display_token(existing.get("token_number"), ex_time)
+        ex_disp = get_display_token(existing.get("token_number"), ex_time, doctor_id=doctor_id, date_str=appt_date)
         try:
             h = int(ex_time[:2]); h12 = h % 12 or 12
             ex_time_str = f"{h12}:{ex_time[3:5]} {'PM' if h >= 12 else 'AM'}"
@@ -3717,7 +3722,7 @@ async def book_appointment(request: Request):
         if appt_time and not is_slot_available(doctor_id, appt_date, appt_time):
             raise HTTPException(status_code=400, detail="Slot already booked")
         token = assign_token_for_slot(doctor_id, appt_date, appt_time)
-        display_tok = get_display_token(token, appt_time)
+        display_tok = get_display_token(token, appt_time, doctor_id=doctor_id, date_str=appt_date)
 
     from database import create_appointment as db_create_appointment, create_online_appointment as db_create_online_appointment
     if consultation_type == "online":
@@ -3729,6 +3734,8 @@ async def book_appointment(request: Request):
         raise HTTPException(status_code=500, detail="Appointment insert failed")
     appt_id = appt["id"]
     token = appt.get("token_number") or token
+    if consultation_type != "online":
+        display_tok = get_display_token(token, appt_time, doctor_id=doctor_id, date_str=appt_date)
 
     # Get patient info
     pat_res = supabase.table("patients").select("name,mobile,patient_code,language").eq("id", patient_id).single().execute()
