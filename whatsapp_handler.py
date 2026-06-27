@@ -800,8 +800,11 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         try:
             from multi_doctor import is_multi_doctor_enabled, get_clinic_doctors, build_doctor_selection_message
             _primary_did = doctor.get("id", "")
-            if _primary_did and await is_multi_doctor_enabled(_supa, _primary_did):
+            _flag = await is_multi_doctor_enabled(_supa, _primary_did) if _primary_did else False
+            print(f"[MULTI_DOCTOR] primary_did={_primary_did!r} flag={_flag} to_number={to_number!r}")
+            if _primary_did and _flag:
                 _md_doctors = await get_clinic_doctors(_supa, to_number)
+                print(f"[MULTI_DOCTOR] clinic_doctors count={len(_md_doctors)}: {[d.get('name') for d in _md_doctors]}")
                 if len(_md_doctors) > 1:
                     _msg = build_doctor_selection_message(_md_doctors)
                     await send_meta_list(
@@ -817,7 +820,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     save_conversation_state(from_number, new_state, new_temp)
                     return None
         except Exception as _mde:
-            print(f"[MULTI_DOCTOR] book branch error (falling through): {_mde}")
+            print(f"[MULTI_DOCTOR] book branch error (falling through): {_mde!r}")
 
         # EXISTING: single doctor flow — untouched
         all_patients = get_all_linked_patients(from_number)
