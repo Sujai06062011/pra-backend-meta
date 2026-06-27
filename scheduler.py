@@ -231,6 +231,19 @@ async def send_evening_reminders():
         print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
 
 
+async def get_all_active_doctors() -> list:
+    """Return all doctors where is_available = true. Used by multi-doctor scheduler loops."""
+    try:
+        result = supabase.table("doctors") \
+            .select("id, name, whatsapp_number, clinic_name") \
+            .eq("is_available", True) \
+            .execute()
+        return result.data or []
+    except Exception as e:
+        print(f"⚠️ get_all_active_doctors failed: {e}")
+        return []
+
+
 async def send_visit_summary():
     """
     6PM Job: Send visit summary to patients who visited today.

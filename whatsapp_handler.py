@@ -33,6 +33,8 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot", "awaiting_session_selection", "awaiting_slot_selection",
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query",
+    # multi-doctor states (dormant until feature flag = true)
+    "awaiting_doctor_select",
 }
 
 # Messages that should always stay in the state machine
@@ -587,6 +589,20 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # Get conversation state
     current_state, temp_data = get_conversation_state(from_number)
 
+    # ── MULTI-DOCTOR: override doctor context if patient selected a specific doctor ──
+    _sel_did = (temp_data or {}).get("selected_doctor_id")
+    if _sel_did and _sel_did != doctor_id:
+        try:
+            from multi_doctor import get_doctor_by_id as _md_get_doctor
+            _sel_doc = await _md_get_doctor(_supa, _sel_did)
+            if _sel_doc:
+                doctor = {**doctor, **{k: v for k, v in _sel_doc.items() if v is not None}}
+                doctor_id = _sel_did
+                doctor_name = _sel_doc.get("name", doctor_name)
+                clinic_name = _sel_doc.get("clinic_name", clinic_name)
+        except Exception as _mde:
+            print(f"[MULTI_DOCTOR] doctor override failed: {_mde}")
+
     # ── GLOBAL COMMANDS (always reset state) ─────────────────
     if t in ["menu", "main menu", "back", "home",
              "hi", "hello", "hey", "start", "help"]:
@@ -673,6 +689,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "query_patient_selected"
     elif current_state == "awaiting_query":
         intent = "query_text_provided"
+    elif current_state == "awaiting_doctor_select":
+        intent = "doctor_selected"
     # Legacy family states — redirect to new booking flow
     elif current_state in ("awaiting_family_choice", "awaiting_family_name",
                            "awaiting_family_dob", "awaiting_family_gender"):
@@ -778,11 +796,62 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── BOOK APPOINTMENT — unified flow ───────────────────────
     elif intent == "book":
+        # NEW: multi-doctor branch (dormant until feature flag = true)
+        try:
+            from multi_doctor import is_multi_doctor_enabled, get_clinic_doctors, build_doctor_selection_message
+            _primary_did = doctor.get("id", "")
+            if _primary_did and await is_multi_doctor_enabled(_supa, _primary_did):
+                _md_doctors = await get_clinic_doctors(_supa, to_number)
+                if len(_md_doctors) > 1:
+                    _msg = build_doctor_selection_message(_md_doctors)
+                    await send_meta_list(
+                        to_number=from_number,
+                        header_text=_msg["header"],
+                        body_text=_msg["body"],
+                        footer_text=_msg["footer"],
+                        button_text=_msg["action"]["button"],
+                        sections=_msg["action"]["sections"],
+                    )
+                    new_state = "awaiting_doctor_select"
+                    new_temp  = {}
+                    save_conversation_state(from_number, new_state, new_temp)
+                    return None
+        except Exception as _mde:
+            print(f"[MULTI_DOCTOR] book branch error (falling through): {_mde}")
+
+        # EXISTING: single doctor flow — untouched
         all_patients = get_all_linked_patients(from_number)
         fallback_text = await send_patient_select_interactive(from_number, all_patients)
         reply     = fallback_text or ""
         new_state = "awaiting_booking_patient_select"
         new_temp  = {"booking_patients": all_patients}
+
+    # ── DOCTOR SELECTED (multi-doctor flow) ───────────────────
+    elif intent == "doctor_selected":
+        try:
+            from multi_doctor import get_doctor_by_id as _md_get_doc
+            raw_id = text.strip()
+            if raw_id.startswith("doctor_"):
+                raw_id = raw_id[len("doctor_"):]
+            _chosen_doc = await _md_get_doc(_supa, raw_id) if raw_id else {}
+            if not _chosen_doc:
+                reply     = "Sorry, that selection was not recognised. Please try again.\n\nReply MENU to start over."
+                new_state = "idle"
+            else:
+                # Store selected doctor and continue to patient/date selection
+                new_state = "awaiting_booking_patient_select"
+                all_patients = get_all_linked_patients(from_number)
+                fallback_text = await send_patient_select_interactive(from_number, all_patients)
+                reply    = fallback_text or ""
+                new_temp = {
+                    "booking_patients": all_patients,
+                    "selected_doctor_id": raw_id,
+                    "selected_doctor_name": _chosen_doc.get("name", ""),
+                }
+        except Exception as _mde:
+            print(f"[MULTI_DOCTOR] doctor_selected error: {_mde}")
+            reply     = "Sorry, something went wrong. Please reply MENU to start over."
+            new_state = "idle"
 
     # ── PATIENT SELECTED for booking ──────────────────────────
     elif intent == "booking_patient_selected":

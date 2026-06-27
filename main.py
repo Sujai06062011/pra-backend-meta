@@ -3467,6 +3467,34 @@ async def update_doctor(doctor_id: str, request: Request):
     return result.data[0] if result.data else {}
 
 
+# ── MULTI-DOCTOR API ──────────────────────────────────
+@app.get("/api/doctors")
+async def list_doctors(clinic_whatsapp: str = None):
+    """All active doctors for a clinic WhatsApp number. Used by frontend doctor switcher."""
+    from multi_doctor import get_clinic_doctors
+    doctors = await get_clinic_doctors(supabase, clinic_whatsapp or "")
+    return {"doctors": doctors}
+
+
+@app.get("/api/me/context")
+async def get_user_context(doctor_id: str):
+    """Role + doctor context for frontend. Used by useClinicContext hook."""
+    from multi_doctor import get_doctor_by_id, is_multi_doctor_enabled
+    doctor = await get_doctor_by_id(supabase, doctor_id)
+    if not doctor:
+        return {"error": "Doctor not found"}, 404
+    multi_doctor = await is_multi_doctor_enabled(supabase, doctor_id)
+    return {
+        "doctor_id": doctor_id,
+        "doctor_name": doctor.get("name", ""),
+        "specialty": doctor.get("specialty_display") or doctor.get("speciality", ""),
+        "clinic_name": doctor.get("clinic_name", ""),
+        "whatsapp_number": doctor.get("whatsapp_number", ""),
+        "role": "doctor",
+        "multi_doctor_enabled": multi_doctor,
+    }
+
+
 # ── VOICE WEBHOOKS ────────────────────────────────────
 @app.get("/webhook/voice/followup")
 @app.post("/webhook/voice/followup")

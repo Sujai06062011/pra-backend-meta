@@ -271,6 +271,24 @@ def create_parro_mcp_server(supabase_client) -> Server:
                     "required": ["primary_mobile", "name", "dob", "gender"]
                 }
             ),
+            Tool(
+                name="get_doctors",
+                description=(
+                    "Get all active doctors in the clinic. "
+                    "Call before booking when multi-doctor mode may be active "
+                    "so the patient can choose their doctor."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "clinic_whatsapp": {
+                            "type": "string",
+                            "description": "Clinic WhatsApp number. Optional — returns all clinic doctors if omitted."
+                        }
+                    },
+                    "required": []
+                }
+            ),
         ]
 
     # ── Tool implementations ──────────────────────────────────
@@ -705,6 +723,30 @@ def create_parro_mcp_server(supabase_client) -> Server:
                     "relationship": relationship,
                     "message": f"{name_val} has been added to your family."
                 })
+
+            # ── get_doctors ──────────────────────────────────────
+            elif name == "get_doctors":
+                clinic_whatsapp = arguments.get("clinic_whatsapp", "")
+                try:
+                    from multi_doctor import get_clinic_doctors
+                    doctors = await get_clinic_doctors(supabase, clinic_whatsapp)
+                except Exception:
+                    q = supabase.table("doctors").select(
+                        "id, name, speciality, specialty_display, is_available, clinic_name"
+                    ).eq("is_available", True)
+                    if clinic_whatsapp:
+                        q = q.eq("whatsapp_number", clinic_whatsapp)
+                    doctors = q.execute().data or []
+
+                return ok({"doctors": [
+                    {
+                        "id": d.get("id"),
+                        "name": d.get("name"),
+                        "specialty": d.get("specialty_display") or d.get("speciality", ""),
+                        "clinic_name": d.get("clinic_name", ""),
+                    }
+                    for d in doctors
+                ]})
 
             else:
                 return err(f"Unknown tool: {name}")
