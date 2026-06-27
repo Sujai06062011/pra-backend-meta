@@ -24,6 +24,37 @@ from routers.availability import (
 
 MENU_HINT = "\n\nReply MENU for main menu or BYE to end conversation."
 
+# States that must stay in the state machine (active multi-step flows)
+_STATE_MACHINE_STATES = {
+    "awaiting_name", "awaiting_dob", "awaiting_gender", "awaiting_language", "awaiting_city",
+    "awaiting_booking_patient_select", "awaiting_new_member_name", "awaiting_new_member_dob",
+    "awaiting_new_member_gender", "awaiting_new_member_language", "awaiting_new_member_city",
+    "awaiting_booking_date", "awaiting_date", "awaiting_consult_type",
+    "awaiting_slot", "awaiting_session_selection", "awaiting_slot_selection",
+    "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
+    "awaiting_query_patient_select", "awaiting_query",
+}
+
+# Messages that should always stay in the state machine
+_SM_KEYWORDS = {
+    "menu", "main menu", "back", "home", "hi", "hello", "hey",
+    "start", "help", "bye", "goodbye", "exit", "end", "quit",
+    "1", "2", "3", "4", "5", "6",
+}
+
+
+def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
+    """Return True when the Claude agent should handle this message."""
+    if not is_existing:
+        return False  # New patients always go through registration state machine
+    if current_state in _STATE_MACHINE_STATES:
+        return False  # Active state machine flow — never interrupt
+    if current_state not in ("idle", "agent"):
+        return False  # Unknown state — let state machine handle it
+    if text.lower().strip() in _SM_KEYWORDS:
+        return False  # Menu shortcuts → state machine
+    return True
+
 MONTHS = {
     "jan": "01", "feb": "02", "mar": "03", "apr": "04",
     "may": "05", "jun": "06", "jul": "07", "aug": "08",
@@ -579,6 +610,18 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             }
             save_conversation_state(from_number, "idle", {})
             return responses.get(t, "Thank you for your response!")
+
+    # ── CLAUDE AGENT (free-form natural language, idle/agent state only) ─────
+    if _should_use_agent(text, current_state, is_existing):
+        try:
+            from agent import run_clinic_agent
+            agent_reply = await run_clinic_agent(from_number, text, doctor)
+            if agent_reply:
+                return agent_reply
+            # None → fall through to state machine below
+        except Exception as _ae:
+            print(f"[AGENT FALLBACK] {_ae}")
+    # ─────────────────────────────────────────────────────────
 
     # ── INTENT DETECTION ──────────────────────────────────────
     intent = "menu"
