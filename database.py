@@ -212,6 +212,8 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None,
     start = cfg["evening_start"] if is_evening else cfg["morning_start"]
     prefix = "E" if is_evening else "M"
 
+    duration = cfg["duration"]
+
     if date_str and doctor_id:
         try:
             from routers.availability import get_availability_for_date
@@ -220,6 +222,8 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None,
             per_start = (av.get(key) or {}).get("start")
             if per_start:
                 start = per_start[:5]
+            if av.get("slot_duration_minutes"):
+                duration = av["slot_duration_minutes"]
         except Exception:
             pass
 
@@ -229,7 +233,7 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None,
     delta = _mins(t) - _mins(start)
     if delta < 0:
         return f"{prefix}?"
-    return f"{prefix}{delta // cfg['duration'] + 1}"
+    return f"{prefix}{delta // duration + 1}"
 
 
 def is_slot_available(doctor_id: str, appointment_date: str, appointment_time) -> bool:
