@@ -98,6 +98,43 @@ TOOLS = [
             "required": ["appointment_id"],
         },
     },
+    {
+        "name": "register_patient",
+        "description": (
+            "Register a new patient. Call when get_patient returns found=False. "
+            "Collect name, date of birth (YYYY-MM-DD), gender, and language first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mobile": {"type": "string"},
+                "name": {"type": "string"},
+                "dob": {"type": "string", "description": "YYYY-MM-DD e.g. 1990-05-15"},
+                "gender": {"type": "string", "enum": ["Male", "Female", "Other"]},
+                "language": {"type": "string", "enum": ["tamil", "english", "hindi"]},
+            },
+            "required": ["mobile", "name", "dob", "gender", "language"],
+        },
+    },
+    {
+        "name": "add_family_member",
+        "description": (
+            "Add a new family member to an existing patient account. "
+            "Call when patient wants to book for someone not yet in their list. "
+            "Collect name, date of birth, gender."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "primary_mobile": {"type": "string", "description": "Mobile of the account holder"},
+                "name": {"type": "string"},
+                "dob": {"type": "string", "description": "YYYY-MM-DD"},
+                "gender": {"type": "string", "enum": ["Male", "Female", "Other"]},
+                "relationship": {"type": "string", "description": "e.g. Son, Daughter, Spouse"},
+            },
+            "required": ["primary_mobile", "name", "dob", "gender"],
+        },
+    },
 ]
 
 
@@ -292,6 +329,93 @@ def _tool_cancel_appointment(appointment_id: str) -> dict:
         return {"success": False, "reason": str(e)}
 
 
+def _tool_register_patient(mobile: str, name: str, dob: str, gender: str, language: str) -> dict:
+    from database import create_patient, supabase as supa
+    try:
+        new_patient = create_patient(
+            mobile, name, dob, gender,
+            family_head_mobile=mobile,
+            language=language, city="",
+            doctor_id=DEFAULT_DOCTOR_ID,
+        )
+        if not new_patient:
+            return {"success": False, "reason": "Registration failed"}
+        return {
+            "success": True,
+            "patient_id": new_patient.get("id", ""),
+            "patient_code": new_patient.get("patient_code", ""),
+            "name": name,
+        }
+    except Exception as e:
+        return {"success": False, "reason": str(e)}
+
+
+def _tool_add_family_member(primary_mobile: str, name: str, dob: str, gender: str, relationship: str = "") -> dict:
+    from database import supabase as supa, _next_patient_counter
+    import re as _re
+    from datetime import date as _date
+    from whatsapp_handler import MONTHS
+
+    # Parse DOB → ISO
+    dob_iso = None
+    birth_year = "0000"
+    age = None
+    try:
+        _dob = dob.strip()
+        dob_date = None
+        nm = _re.match(r"^(\d{1,2})[/\-\s](\d{1,2})[/\-\s](\d{4})$", _dob)
+        if nm:
+            dob_date = _date(int(nm.group(3)), int(nm.group(2)), int(nm.group(1)))
+        if not dob_date:
+            dm = _re.search(r"(\d{1,2})[\s\-/]+([a-zA-Z]+)[\s\-/]+(\d{4})", _dob)
+            if dm:
+                m_num = MONTHS.get(dm.group(2).lower()[:3])
+                if m_num:
+                    dob_date = _date(int(dm.group(3)), int(m_num), int(dm.group(1)))
+        if not dob_date and len(_dob) == 10 and _dob[4] == "-":
+            dob_date = _date.fromisoformat(_dob)
+        if dob_date:
+            today_d = _date.today()
+            age = today_d.year - dob_date.year - (
+                (today_d.month, today_d.day) < (dob_date.month, dob_date.day)
+            )
+            dob_iso = dob_date.isoformat()
+            birth_year = str(dob_date.year)
+    except Exception:
+        pass
+
+    name_part = name[:3].upper().replace(" ", "")
+    counter = _next_patient_counter(DEFAULT_DOCTOR_ID)
+    patient_code = f"{name_part}-{birth_year}-{counter}"
+    gender_clean = "Male" if gender.lower().startswith("m") else (
+        "Female" if gender.lower().startswith("f") else "Other")
+
+    try:
+        ins = supa.table("patients").insert({
+            "mobile": primary_mobile,
+            "whatsapp_number": primary_mobile,
+            "name": name,
+            "date_of_birth": dob_iso,
+            "age": age,
+            "gender": gender_clean,
+            "language": "tamil",
+            "patient_code": patient_code,
+            "family_head_mobile": primary_mobile,
+            "registration_source": "whatsapp",
+            "doctor_id": DEFAULT_DOCTOR_ID,
+        }).execute()
+        new_id = ins.data[0]["id"] if ins.data else ""
+        return {
+            "success": True,
+            "patient_id": new_id,
+            "patient_code": patient_code,
+            "name": name,
+            "age": age,
+        }
+    except Exception as e:
+        return {"success": False, "reason": str(e)}
+
+
 def _dispatch_tool(name: str, inputs: dict) -> str:
     try:
         if name == "get_patient":
@@ -306,6 +430,16 @@ def _dispatch_tool(name: str, inputs: dict) -> str:
             result = _tool_get_queue_status(inputs["mobile"])
         elif name == "cancel_appointment":
             result = _tool_cancel_appointment(inputs["appointment_id"])
+        elif name == "register_patient":
+            result = _tool_register_patient(
+                inputs["mobile"], inputs["name"], inputs["dob"],
+                inputs["gender"], inputs["language"],
+            )
+        elif name == "add_family_member":
+            result = _tool_add_family_member(
+                inputs["primary_mobile"], inputs["name"], inputs["dob"],
+                inputs["gender"], inputs.get("relationship", ""),
+            )
         else:
             result = {"error": f"Unknown tool: {name}"}
     except Exception as e:
@@ -384,6 +518,8 @@ RULES:
 - Reply in the same language the patient used (Tamil or English — do not mix)
 - Keep replies short and WhatsApp-friendly (no markdown bold ** or # headers)
 - Always call get_patient(mobile="{mobile}") first to get patient_id before booking
+- If get_patient returns found=False: collect name, DOB, gender, language then call register_patient
+- If patient wants to book for someone not in their list: collect name+DOB+gender then call add_family_member
 - For booking: call get_available_slots first, present options, confirm with patient, then book
 - If patient has multiple family members, ask which one the appointment is for
 - If intent is unclear, ask exactly ONE clarifying question

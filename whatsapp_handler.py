@@ -45,14 +45,16 @@ _SM_KEYWORDS = {
 
 def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
     """Return True when the Claude agent should handle this message."""
-    if not is_existing:
-        return False  # New patients always go through registration state machine
     if current_state in _STATE_MACHINE_STATES:
         return False  # Active state machine flow — never interrupt
     if current_state not in ("idle", "agent"):
         return False  # Unknown state — let state machine handle it
     if text.lower().strip() in _SM_KEYWORDS:
         return False  # Menu shortcuts → state machine
+    # New patients with simple digit/keyword → state machine registration flow
+    if not is_existing and text.lower().strip() in {"1", "2", "3", "4", "5", "6",
+                                                     "hi", "hello", "hey", "start"}:
+        return False
     return True
 
 MONTHS = {
