@@ -1172,20 +1172,19 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
                     try:
                         _pc = _supa.table("patients").select("patient_code").eq("id", booking_for).single().execute()
-                        patient_code_line = f"\nPatient Code: {_pc.data['patient_code']}" if _pc.data and _pc.data.get("patient_code") else ""
+                        patient_code = (_pc.data or {}).get("patient_code", "") if _pc.data else ""
                     except Exception:
-                        patient_code_line = ""
+                        patient_code = ""
 
+                    pat_line = f"{booking_name} ({patient_code})" if patient_code else booking_name
                     reply = (
-                        f"Online Consultation Confirmed! 🎥✅\n\n"
-                        f"Patient: {booking_name}"
-                        f"{patient_code_line}\n"
-                        f"Date: {booking_date}\n"
-                        f"Time: {format_time(selected_slot)}\n"
-                        f"Token: {display_tok}\n\n"
+                        f"✅ Online Consultation Confirmed! 🎥\n\n"
+                        f"🏥 {clinic_name}\n"
+                        f"👤 {pat_line}\n"
+                        f"📅 {booking_date}\n"
+                        f"⏰ {format_time(selected_slot)} | Token {display_tok}\n\n"
                         f"You will receive a video join link shortly.\n"
-                        f"Reply CANCEL to cancel."
-                        + MENU_HINT
+                        f"Reply CANCEL to cancel. Reply MENU for help."
                     )
                     new_state = "idle"
 
@@ -1238,21 +1237,19 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
                 try:
                     _pc = _supa.table("patients").select("patient_code").eq("id", booking_for).single().execute()
-                    patient_code_line = f"\nPatient Code: {_pc.data['patient_code']}" if _pc.data and _pc.data.get("patient_code") else ""
+                    patient_code = (_pc.data or {}).get("patient_code", "") if _pc.data else ""
                 except Exception:
-                    patient_code_line = ""
+                    patient_code = ""
 
+                pat_line = f"{booking_name} ({patient_code})" if patient_code else booking_name
                 reply = (
-                    f"Appointment Confirmed! ✅\n\n"
-                    f"Patient: {booking_name}"
-                    f"{patient_code_line}\n"
-                    f"Date: {booking_date}\n"
-                    f"Time: {format_time(selected_slot)}\n"
-                    f"Token: {display_tok}\n"
-                    f"Clinic: {clinic_name}\n\n"
+                    f"✅ Appointment Confirmed!\n\n"
+                    f"🏥 {clinic_name}\n"
+                    f"👤 {pat_line}\n"
+                    f"📅 {booking_date}\n"
+                    f"⏰ {format_time(selected_slot)} | Token {display_tok}\n\n"
                     f"Please mention your token when you arrive.\n"
-                    f"Reply CANCEL to cancel. See you soon!"
-                    + MENU_HINT
+                    f"Reply CANCEL to cancel. Reply MENU for help."
                 )
                 new_state = "idle"
 

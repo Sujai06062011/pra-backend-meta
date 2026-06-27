@@ -568,7 +568,16 @@ RULES:
 - For booking: call get_available_slots first, present options, confirm with patient, then book
 - If patient has multiple family members, ask which one the appointment is for
 - If intent is unclear, ask exactly ONE clarifying question
-- After completing a task, end with a brief next-action hint"""
+- After a successful booking use EXACTLY this format (no deviations):
+  ✅ Appointment Confirmed!
+
+  🏥 {clinic_name}
+  👤 {patient_name} ({patient_code})
+  📅 {date in "DD Mon YYYY"}
+  ⏰ {time in "H:MM AM/PM"} | Token {token}
+
+  Please mention your token when you arrive.
+  Reply CANCEL to cancel. Reply MENU for help."""
 
     # Append current user message to history
     history.append({"role": "user", "content": text})
