@@ -855,16 +855,17 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── PATIENT SELECTED for booking ──────────────────────────
     elif intent == "booking_patient_selected":
         all_patients = temp_data.get("booking_patients", [])
+        _md_carry = {"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}
         try:
             choice = int(t) - 1
             if choice == len(all_patients):
                 # Add new family member
                 reply     = "Please enter the new family member's full name:"
                 new_state = "awaiting_new_member_name"
-                new_temp  = {}
+                new_temp  = {**_md_carry}
             elif 0 <= choice < len(all_patients):
                 p = all_patients[choice]
-                base_temp = {"booking_for": p["id"], "booking_name": p["name"]}
+                base_temp = {"booking_for": p["id"], "booking_name": p["name"], **_md_carry}
                 if doctor.get("online_consultation_enabled"):
                     await send_meta_buttons(
                         to_number=from_number,
@@ -896,7 +897,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     elif intent == "new_member_name_provided":
         reply     = f"What is their date of birth?\n\n(e.g. 15 Jun 1990)"
         new_state = "awaiting_new_member_dob"
-        new_temp  = {"new_name": text}
+        _md_carry = {"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}
+        new_temp  = {"new_name": text, **_md_carry}
 
     elif intent == "new_member_dob_provided":
         await send_meta_buttons(
@@ -1009,7 +1011,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             f"🎂 {age_str} · {gender_clean}\n\n"
             f"What would you like to do next?"
         )
-        base_temp = {"booking_for": new_pid, "booking_name": raw_name}
+        _md_carry = {"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}
+        base_temp = {"booking_for": new_pid, "booking_name": raw_name, **_md_carry}
         if doctor.get("online_consultation_enabled"):
             await send_whatsapp_text(from_number, reg_msg)
             await send_meta_buttons(
