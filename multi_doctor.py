@@ -7,8 +7,45 @@ All functions catch ALL exceptions and return safe defaults — never crash.
 """
 
 
+async def get_clinic_doctors(supabase, clinic_whatsapp_number: str) -> list:
+    """Return active doctors at this clinic WhatsApp number that have multi-doctor enabled.
+
+    Multi-doctor is considered active when 2+ such doctors exist.
+    Each doctor controls their own participation via feature.multi_doctor.enabled in clinic_config.
+    Falls back to [] on any error so callers always get single-doctor flow.
+    """
+    try:
+        # Get all is_available doctors sharing this WhatsApp number
+        doctors_res = supabase.table("doctors") \
+            .select("id, name, speciality, specialty_display, is_available, clinic_name") \
+            .eq("whatsapp_number", clinic_whatsapp_number.replace("+", "")) \
+            .eq("is_available", True) \
+            .execute()
+        doctors = doctors_res.data or []
+        if len(doctors) < 2:
+            return []
+
+        # Filter to only those with feature.multi_doctor.enabled = 'true'
+        doctor_ids = [d["id"] for d in doctors]
+        flags_res = supabase.table("clinic_config") \
+            .select("doctor_id, config_value") \
+            .in_("doctor_id", doctor_ids) \
+            .eq("config_key", "feature.multi_doctor.enabled") \
+            .execute()
+        enabled_ids = {
+            r["doctor_id"]
+            for r in (flags_res.data or [])
+            if r.get("config_value") == "true"
+        }
+        eligible = [d for d in doctors if d["id"] in enabled_ids]
+        return eligible if len(eligible) >= 2 else []
+    except Exception:
+        return []
+
+
 async def is_multi_doctor_enabled(supabase, clinic_doctor_id: str) -> bool:
-    """Check feature flag. Returns False on any error (safe default)."""
+    """Legacy helper — now just checks if get_clinic_doctors would return 2+ doctors.
+    Kept for backward compatibility with any direct callers."""
     try:
         result = supabase.table("clinic_config") \
             .select("config_value") \
@@ -19,19 +56,6 @@ async def is_multi_doctor_enabled(supabase, clinic_doctor_id: str) -> bool:
         return bool(rows and rows[0].get("config_value") == "true")
     except Exception:
         return False
-
-
-async def get_clinic_doctors(supabase, clinic_whatsapp_number: str) -> list:
-    """Get all active doctors that share this clinic WhatsApp number."""
-    try:
-        result = supabase.table("doctors") \
-            .select("id, name, speciality, specialty_display, is_available, clinic_name") \
-            .eq("whatsapp_number", clinic_whatsapp_number) \
-            .eq("is_available", True) \
-            .execute()
-        return result.data or []
-    except Exception:
-        return []
 
 
 async def get_doctor_by_id(supabase, doctor_id: str) -> dict:

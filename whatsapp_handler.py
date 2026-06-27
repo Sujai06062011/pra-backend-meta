@@ -798,14 +798,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     elif intent == "book":
         # NEW: multi-doctor branch (dormant until feature flag = true)
         try:
-            from multi_doctor import is_multi_doctor_enabled, get_clinic_doctors, build_doctor_selection_message
-            _primary_did = doctor.get("id", "")
-            _flag = await is_multi_doctor_enabled(_supa, _primary_did) if _primary_did else False
-            print(f"[MULTI_DOCTOR] primary_did={_primary_did!r} flag={_flag} to_number={to_number!r}")
-            if _primary_did and _flag:
-                _md_doctors = await get_clinic_doctors(_supa, to_number)
-                print(f"[MULTI_DOCTOR] clinic_doctors count={len(_md_doctors)}: {[d.get('name') for d in _md_doctors]}")
-                if len(_md_doctors) > 1:
+            from multi_doctor import get_clinic_doctors, build_doctor_selection_message
+            _md_doctors = await get_clinic_doctors(_supa, to_number)
+            print(f"[MULTI_DOCTOR] eligible doctors={[d.get('name') for d in _md_doctors]}")
+            if len(_md_doctors) >= 2:
                     _msg = build_doctor_selection_message(_md_doctors)
                     await send_meta_list(
                         to_number=from_number,
@@ -1249,9 +1245,14 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         patient_code = ""
 
                     pat_line = f"{booking_name} ({patient_code})" if patient_code else booking_name
+                    _doc_line = ""
+                    if temp_data.get("selected_doctor_id"):
+                        _specialty = doctor.get("specialty_display") or doctor.get("speciality", "")
+                        _doc_line = f"👨‍⚕️ {doctor_name}" + (f" | {_specialty}" if _specialty else "") + "\n"
                     reply = (
                         f"✅ Online Consultation Confirmed! 🎥\n\n"
                         f"🏥 {clinic_name}\n"
+                        f"{_doc_line}"
                         f"👤 {pat_line}\n"
                         f"📅 {booking_date}\n"
                         f"⏰ {format_time(selected_slot)} | Token {display_tok}\n\n"
@@ -1314,9 +1315,14 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     patient_code = ""
 
                 pat_line = f"{booking_name} ({patient_code})" if patient_code else booking_name
+                _doc_line = ""
+                if temp_data.get("selected_doctor_id"):
+                    _specialty = doctor.get("specialty_display") or doctor.get("speciality", "")
+                    _doc_line = f"👨‍⚕️ {doctor_name}" + (f" | {_specialty}" if _specialty else "") + "\n"
                 reply = (
                     f"✅ Appointment Confirmed!\n\n"
                     f"🏥 {clinic_name}\n"
+                    f"{_doc_line}"
                     f"👤 {pat_line}\n"
                     f"📅 {booking_date}\n"
                     f"⏰ {format_time(selected_slot)} | Token {display_tok}\n\n"
