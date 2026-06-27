@@ -812,7 +812,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         header_text=_msg["header"],
                         body_text=_msg["body"],
                         footer_text=_msg["footer"],
-                        button_text=_msg["action"]["button"],
+                        button_label=_msg["action"]["button"],
                         sections=_msg["action"]["sections"],
                     )
                     new_state = "awaiting_doctor_select"
