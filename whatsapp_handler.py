@@ -1054,6 +1054,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             "consult_type":  consult_type,
             "date_options":  date_opts,
             "date_labels":   date_labels,
+            **({"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}),
         }
 
     # ── DATE PROVIDED ─────────────────────────────────────────
@@ -1127,6 +1128,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     "booking_for":     booking_for,
                     "booking_name":    booking_name,
                     "consult_type":    "online",
+                    **({"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}),
                 }
                 new_state, new_temp = await send_session_or_slot_ui(
                     from_number, morning_online, evening_online,
@@ -1172,6 +1174,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         "booking_for":     booking_for,
                         "booking_name":    booking_name,
                         "consult_type":    "in_clinic",
+                        **({"selected_doctor_id": temp_data["selected_doctor_id"]} if temp_data.get("selected_doctor_id") else {}),
                     }
                     new_state, new_temp = await send_session_or_slot_ui(
                         from_number, morning_time, evening_time,
