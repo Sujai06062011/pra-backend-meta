@@ -214,14 +214,12 @@ def get_display_token(token_number, appointment_time, all_day_appointments=None,
 
     if date_str and doctor_id:
         try:
-            res = supabase.table("clinic_availability").select(
-                "morning_start, evening_start"
-            ).eq("doctor_id", doctor_id).eq("availability_date", date_str).limit(1).execute()
-            if res.data:
-                row = res.data[0]
-                per_start = row.get("evening_start" if is_evening else "morning_start")
-                if per_start:
-                    start = _time_str(per_start)[:5]
+            from routers.availability import get_availability_for_date
+            av = get_availability_for_date(doctor_id, date_str)
+            key = "evening" if is_evening else "morning"
+            per_start = (av.get(key) or {}).get("start")
+            if per_start:
+                start = per_start[:5]
         except Exception:
             pass
 
