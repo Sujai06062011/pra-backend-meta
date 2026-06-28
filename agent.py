@@ -544,7 +544,7 @@ async def run_clinic_agent(mobile: str, text: str, doctor: dict) -> str | None:
     today_str = now_ist.date().isoformat()
     tomorrow_str = (now_ist.date() + timedelta(days=1)).isoformat()
 
-    clinic_name = doctor.get("clinic_name", "Dr. Kumar Child Care Clinic")
+    clinic_name = doctor.get("clinic_name", "TrueCare Family Clinic")
     doctor_name = doctor.get("name", "Dr. Kumar")
     clinic_timings = doctor.get("clinic_timings", "Mon-Sat: 9AM-1PM, 5PM-8PM")
     clinic_address = doctor.get("clinic_address", "Chennai")

@@ -466,7 +466,7 @@ async def send_followup_whatsapp_from_followups(followup: dict):
         followup_id = str(followup["id"])
         body_text = (
             f"Hi! How is {patient_name} feeling after the visit on "
-            f"{visit_date}?\n🏥 Dr. Kumar Child Care Clinic"
+            f"{visit_date}?\n🏥 TrueCare Family Clinic"
         )
         buttons = [
             {"id": f"ok__{followup_id}", "title": "Doing well"},
@@ -474,7 +474,7 @@ async def send_followup_whatsapp_from_followups(followup: dict):
             {"id": f"appt__{followup_id}", "title": "Needs appointment"}
         ]
         await send_meta_interactive(mobile, body_text, buttons,
-            footer="Dr. Kumar Child Care Clinic")
+            footer="TrueCare Family Clinic")
 
         # Mark followup as Whatsapp-Sent so voice call job picks it up next
         supabase.table("followups").update(

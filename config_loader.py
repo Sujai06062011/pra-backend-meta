@@ -99,7 +99,7 @@ def is_enabled(feature: str, doctor_id: str = DOCTOR_ID) -> bool:
 
 
 def clinic_name(doctor_id: str = DOCTOR_ID) -> str:
-    return get("clinic.name", "Dr. Kumar Child Care Clinic", doctor_id)
+    return get("clinic.name", "TrueCare Family Clinic", doctor_id)
 
 
 def doctor_name(doctor_id: str = DOCTOR_ID) -> str:

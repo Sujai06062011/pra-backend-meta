@@ -976,7 +976,7 @@ async def meta_webhook_inbound(request: Request):
                             }).eq("id", followup_id).execute()
                             await send_meta_text(from_number,
                                 "Great to hear! Wishing continued good health. Take care! 🌟\n"
-                                "— Dr. Kumar Child Care Clinic")
+                                "— TrueCare Family Clinic")
 
                         elif action == "recovering":
                             supabase.table("followups").update({
@@ -997,7 +997,7 @@ async def meta_webhook_inbound(request: Request):
                             await send_meta_text(from_number,
                                 "Understood! We'll check in again in 3 days. "
                                 "Rest well and follow the prescription. 🙏\n"
-                                "— Dr. Kumar Child Care Clinic")
+                                "— TrueCare Family Clinic")
 
                         elif action == "appt":
                             supabase.table("followups").update({
@@ -1621,10 +1621,14 @@ async def write_prescription(request: Request):
 
         med_lines = "\n\n".join(med_line(m, language, i+1) for i, m in enumerate(medicines_input) if m.get("medicine_name","").strip())
 
+        _doc_res = supabase.table("doctors").select("clinic_name, name").eq("id", doctor_id_req).limit(1).execute()
+        _doc_row = (_doc_res.data or [{}])[0]
+        _clinic_name = _doc_row.get("clinic_name") or "TrueCare Family Clinic"
+
         if language == "tamil":
             msg = (
                 f"💊 *மருந்துச் சீட்டு*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 {_clinic_name}\n\n"
                 f"நோயாளி: {pname}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"தேதி: {now_ist.strftime('%d %b %Y')}\n"
                 f"நோய்: {diagnosis}\n\n"
@@ -1638,7 +1642,7 @@ async def write_prescription(request: Request):
         else:
             msg = (
                 f"💊 *Your Prescription*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 {_clinic_name}\n\n"
                 f"Patient: {pname}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"Date: {now_ist.strftime('%d %b %Y')}\n"
                 f"Diagnosis: {diagnosis}\n\n"
@@ -1925,14 +1929,14 @@ async def register_patient(request: Request):
         if is_family:
             msg = (
                 f"👋 வணக்கம் {pat_name}!\n\n"
-                f"🏥 Dr. Kumar Child Care Clinic-ல் நீங்கள் பதிவு செய்யப்பட்டீர்கள்.\n"
+                f"🏥 TrueCare Family Clinic-ல் நீங்கள் பதிவு செய்யப்பட்டீர்கள்.\n"
                 f"🪪 உங்கள் Patient ID: *{pat_code}*\n\n"
                 f"சந்திப்பு பதிவு செய்ய MENU என்று reply பண்ணுங்கள்."
             )
         else:
             msg = (
                 f"👋 வணக்கம் {pat_name}!\n\n"
-                f"🏥 Dr. Kumar Child Care Clinic-ல் உங்களை வரவேற்கிறோம்.\n"
+                f"🏥 TrueCare Family Clinic-ல் உங்களை வரவேற்கிறோம்.\n"
                 f"🪪 உங்கள் Patient ID: *{pat_code}*\n\n"
                 f"இந்த ID-ஐ ஒவ்வொரு வருகையிலும் பயன்படுத்துங்கள்.\n"
                 f"சந்திப்பு பதிவு செய்ய MENU என்று reply பண்ணுங்கள்."
@@ -1941,13 +1945,13 @@ async def register_patient(request: Request):
         if is_family:
             msg = (
                 f"👋 Hello {pat_name}!\n\n"
-                f"🏥 You have been registered at Dr. Kumar Child Care Clinic.\n"
+                f"🏥 You have been registered at TrueCare Family Clinic.\n"
                 f"🪪 Your Patient ID: *{pat_code}*\n\n"
                 f"Reply MENU to book an appointment."
             )
         else:
             msg = (
-                f"👋 Welcome to Dr. Kumar Child Care Clinic, {pat_name}!\n\n"
+                f"👋 Welcome to TrueCare Family Clinic, {pat_name}!\n\n"
                 f"🪪 Your Patient ID: *{pat_code}*\n\n"
                 f"Please save this ID — you'll need it at every visit.\n"
                 f"Reply MENU to book an appointment."
@@ -2630,7 +2634,7 @@ async def update_prescription(prescription_id: str, request: Request, background
         if language == "tamil":
             msg = (
                 f"💊 *மருந்துச் சீட்டு (புதுப்பிக்கப்பட்டது)*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 TrueCare Family Clinic\n\n"
                 f"நோயாளி: {pname}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"தேதி: {now_ist.strftime('%d %b %Y')}\n"
                 f"நோய்: {diagnosis}\n\n"
@@ -2642,7 +2646,7 @@ async def update_prescription(prescription_id: str, request: Request, background
         else:
             msg = (
                 f"💊 *Updated Prescription*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 TrueCare Family Clinic\n\n"
                 f"Patient: {pname}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"Date: {now_ist.strftime('%d %b %Y')}\n"
                 f"Diagnosis: {diagnosis}\n\n"
@@ -3330,10 +3334,13 @@ async def send_prescription_whatsapp(prescription_id: str):
             if m.get("medicine_name", "").strip()
         )
 
+        _doc_res2 = db.table("doctors").select("clinic_name").eq("id", pres.get("doctor_id", "")).limit(1).execute()
+        _clinic_name2 = ((_doc_res2.data or [{}])[0].get("clinic_name")) or "TrueCare Family Clinic"
+
         if language == "tamil":
             msg = (
                 f"💊 *மருந்துச் சீட்டு*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 {_clinic_name2}\n\n"
                 f"நோயாளி: {name}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"தேதி: {pdate_fmt}\n\n"
                 f"மருந்துகள்:\n{med_lines}"
@@ -3346,7 +3353,7 @@ async def send_prescription_whatsapp(prescription_id: str):
         else:
             msg = (
                 f"💊 *Your Prescription*\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n\n"
+                f"🏥 {_clinic_name2}\n\n"
                 f"Patient: {name}" + (f" ({pcode})" if pcode else "") + f"\n"
                 f"Date: {pdate_fmt}\n\n"
                 f"Medicines:\n{med_lines}"
@@ -3432,7 +3439,7 @@ async def answer_query(query_id: str, request: Request):
             patient_code = pat.data[0].get("patient_code", "") if pat.data else ""
             if mobile:
                 msg = (
-                    f"👨‍⚕️ *Dr. Kumar Child Care Clinic*\n\n"
+                    f"👨‍⚕️ *TrueCare Family Clinic*\n\n"
                     f"Patient: *{patient_code}*\n\n"
                     f"Dr. Kumar has replied to your question:\n\n"
                     f"*Your question:* _{question_text}_\n"
@@ -3912,7 +3919,7 @@ async def book_appointment(request: Request):
         if language == "tamil":
             msg = (
                 f"✅ ஆன்லைன் சந்திப்பு உறுதிப்படுத்தப்பட்டது! 🎥\n\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n"
+                f"🏥 TrueCare Family Clinic\n"
                 f"👤 {pat_name} ({pat_code})\n"
                 f"📅 {date_display}\n"
                 f"⏰ {time_display} | Token {display_tok}\n\n"
@@ -3922,7 +3929,7 @@ async def book_appointment(request: Request):
         else:
             msg = (
                 f"✅ Online Consultation Confirmed! 🎥\n\n"
-                f"🏥 Dr. Kumar Child Care Clinic\n"
+                f"🏥 TrueCare Family Clinic\n"
                 f"👤 {pat_name} ({pat_code})\n"
                 f"📅 {date_display}\n"
                 f"⏰ {time_display} | Token {display_tok}\n\n"
@@ -3932,7 +3939,7 @@ async def book_appointment(request: Request):
     elif language == "tamil":
         msg = (
             f"✅ சந்திப்பு உறுதிப்படுத்தப்பட்டது!\n\n"
-            f"🏥 Dr. Kumar Child Care Clinic\n"
+            f"🏥 TrueCare Family Clinic\n"
             f"👤 {pat_name} ({pat_code})\n"
             f"📅 {date_display}\n"
             f"⏰ {time_display} | Token {display_tok}\n\n"
@@ -3943,7 +3950,7 @@ async def book_appointment(request: Request):
     else:
         msg = (
             f"✅ Appointment Confirmed!\n\n"
-            f"🏥 Dr. Kumar Child Care Clinic\n"
+            f"🏥 TrueCare Family Clinic\n"
             f"👤 {pat_name} ({pat_code})\n"
             f"📅 {date_display}\n"
             f"⏰ {time_display} | Token {display_tok}\n\n"
@@ -4001,13 +4008,13 @@ async def test_meta_interactive(request: Request):
     to = body.get("to", "919047099959")
     result = await send_meta_interactive(
         to,
-        "Test from PRA! How is Aadhira feeling?\n🏥 Dr. Kumar Child Care Clinic",
+        "Test from PRA! How is Aadhira feeling?\n🏥 TrueCare Family Clinic",
         [
             {"id": "ok__test-followup-123", "title": "Doing well"},
             {"id": "recovering__test-followup-123", "title": "Still recovering"},
             {"id": "appt__test-followup-123", "title": "Needs appointment"}
         ],
-        footer="Dr. Kumar Child Care Clinic"
+        footer="TrueCare Family Clinic"
     )
     return result
 
