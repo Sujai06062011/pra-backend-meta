@@ -3478,14 +3478,12 @@ async def update_doctor(doctor_id: str, request: Request):
 @app.post("/api/auth/login")
 async def auth_login(request: Request):
     """PIN-based staff login. Returns JWT token + role info."""
-    from auth import login_staff, hash_pin
+    from auth import login_staff
     body = await request.json()
     username = (body.get("username") or "").strip().lower()
     pin = (body.get("pin") or "").strip()
     if not username or not pin:
         raise HTTPException(status_code=400, detail="username and pin required")
-    computed_hash = hash_pin(pin)
-    print(f"[AUTH_DEBUG] username={username} computed_hash={computed_hash}")
     result = await login_staff(supabase, username, pin)
     if not result:
         raise HTTPException(status_code=401, detail="Invalid username or PIN")
