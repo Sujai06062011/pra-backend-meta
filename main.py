@@ -791,10 +791,16 @@ async def meta_webhook_inbound(request: Request):
                     else:
                         await handle_member_interactive(from_number, list_id, clinic_number)
                 elif list_id.startswith("doctor_"):
-                    # multi-doctor: pass the raw list_id as text so doctor_selected intent can parse it
                     current_state, _ = get_conversation_state(from_number)
                     if current_state != "awaiting_doctor_select":
                         print(f"[STALE] doctor list ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, list_id, clinic_number)
+                elif list_id.startswith("qdr_"):
+                    # query doctor selection
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_query_doctor_select":
+                        print(f"[STALE] query doctor list ignored, state={current_state}")
                     else:
                         await handle_inbound_message(from_number, list_id, clinic_number)
                 else:
@@ -3438,12 +3444,16 @@ async def answer_query(query_id: str, request: Request):
             mobile = pat.data[0]["mobile"] if pat.data else None
             patient_code = pat.data[0].get("patient_code", "") if pat.data else ""
             if mobile:
+                _dr_res = supabase.table("doctors").select("name, clinic_name").eq("id", doctor_id).limit(1).execute()
+                _dr_row = (_dr_res.data or [{}])[0]
+                _reply_doctor_name = _dr_row.get("name") or "Doctor"
+                _reply_clinic_name = _dr_row.get("clinic_name") or "TrueCare Family Clinic"
                 msg = (
-                    f"👨‍⚕️ *TrueCare Family Clinic*\n\n"
+                    f"👨‍⚕️ *{_reply_clinic_name}*\n\n"
                     f"Patient: *{patient_code}*\n\n"
-                    f"Dr. Kumar has replied to your question:\n\n"
+                    f"{_reply_doctor_name} has replied to your question:\n\n"
                     f"*Your question:* _{question_text}_\n"
-                    f"*Dr. Kumar's reply:* _{reply_text}_\n\n"
+                    f"*{_reply_doctor_name}'s reply:* _{reply_text}_\n\n"
                     f"Reply MENU for main menu."
                 )
                 await send_meta_text(mobile, msg)

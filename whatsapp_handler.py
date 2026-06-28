@@ -32,7 +32,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_booking_date", "awaiting_date", "awaiting_consult_type",
     "awaiting_slot", "awaiting_session_selection", "awaiting_slot_selection",
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
-    "awaiting_query_patient_select", "awaiting_query",
+    "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -457,18 +457,23 @@ def get_all_linked_patients(mobile: str) -> list:
     return result.data or []
 
 
-def filter_patients_with_active_prescriptions(patients: list) -> list:
-    """Keep only patients who have a prescription whose medicine course is still running."""
+def get_active_prescription_doctors(patients: list) -> dict:
+    """Return {patient_id: [{"id": doctor_id, "name": ..., "specialty": ...}]} for active prescriptions.
+
+    A prescription is active when at least one medicine's course is still running today.
+    Only patients with >= 1 active prescription are included in the result.
+    """
     if not patients:
-        return []
+        return {}
     import pytz
     today = datetime.now(pytz.timezone("Asia/Kolkata")).date()
     ids = [p["id"] for p in patients]
     res = _supa.table("prescriptions").select(
-        "patient_id, prescription_date, prescription_medicines(duration_days)"
+        "patient_id, doctor_id, prescription_date, prescription_medicines(duration_days)"
     ).in_("patient_id", ids).execute()
 
-    active_ids = set()
+    # patient_id → set of active doctor_ids
+    active_map: dict[str, set] = {}
     for pres in (res.data or []):
         pres_date_str = pres.get("prescription_date") or ""
         if not pres_date_str:
@@ -480,9 +485,39 @@ def filter_patients_with_active_prescriptions(patients: list) -> list:
         for med in pres.get("prescription_medicines") or []:
             duration = med.get("duration_days") or 1
             if pres_date + timedelta(days=duration - 1) >= today:
-                active_ids.add(pres["patient_id"])
+                pid = pres["patient_id"]
+                did = pres.get("doctor_id")
+                if did:
+                    active_map.setdefault(pid, set()).add(did)
                 break
-    return [p for p in patients if p["id"] in active_ids]
+
+    if not active_map:
+        return {}
+
+    # Fetch doctor details for all active doctor IDs
+    all_doctor_ids = list({did for dids in active_map.values() for did in dids})
+    doc_res = _supa.table("doctors").select("id, name, specialty_display, speciality").in_("id", all_doctor_ids).execute()
+    doctor_lookup = {d["id"]: d for d in (doc_res.data or [])}
+
+    result = {}
+    for pid, dids in active_map.items():
+        result[pid] = [
+            {
+                "id": did,
+                "name": doctor_lookup.get(did, {}).get("name", "Doctor"),
+                "specialty": (doctor_lookup.get(did, {}).get("specialty_display") or
+                              doctor_lookup.get(did, {}).get("speciality", "")),
+            }
+            for did in dids
+            if did in doctor_lookup
+        ]
+    return result
+
+
+def filter_patients_with_active_prescriptions(patients: list) -> list:
+    """Legacy wrapper — returns patients list filtered to those with active prescriptions."""
+    active_map = get_active_prescription_doctors(patients)
+    return [p for p in patients if p["id"] in active_map]
 
 
 def build_patient_select_msg(patients: list) -> str:
@@ -695,6 +730,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "cancel_choice"
     elif current_state == "awaiting_query_patient_select":
         intent = "query_patient_selected"
+    elif current_state == "awaiting_query_doctor_select":
+        intent = "query_doctor_selected"
     elif current_state == "awaiting_query":
         intent = "query_text_provided"
     elif current_state == "awaiting_doctor_select":
@@ -1685,9 +1722,9 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── ASK DOCTOR A QUESTION ─────────────────────────────────
     elif intent == "ask_question":
         all_patients = get_all_linked_patients(from_number)
-        active_patients = filter_patients_with_active_prescriptions(all_patients)
+        active_map = get_active_prescription_doctors(all_patients)
 
-        if not active_patients:
+        if not active_map:
             reply = (
                 "None of the patients registered under your number have an "
                 "active prescription right now.\n\n"
@@ -1696,36 +1733,79 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 + MENU_HINT
             )
             new_state = "idle"
-        elif len(active_patients) == 1:
-            p = active_patients[0]
-            reply = (
-                f"Please type your question for Dr. Kumar about {p['name']}.\n\n"
-                "Our doctor will reply within a few hours. 💬"
-            )
-            new_state = "awaiting_query"
-            new_temp  = {"query_patient_id": p["id"]}
         else:
-            lines = "Your question is for which patient?\n\n"
-            for i, p in enumerate(active_patients, 1):
-                code = f" ({p['patient_code']})" if p.get("patient_code") else ""
-                lines += f"{i}. {p['name']}{code}\n"
-            lines += "\nReply with a number."
-            reply     = lines
-            new_state = "awaiting_query_patient_select"
-            new_temp  = {"query_patients": active_patients}
+            active_patients = [p for p in all_patients if p["id"] in active_map]
+            if len(active_patients) == 1:
+                # One patient — go straight to doctor check
+                p = active_patients[0]
+                doctors = active_map[p["id"]]
+                if len(doctors) == 1:
+                    d = doctors[0]
+                    reply = (
+                        f"Please type your question for {d['name']} about {p['name']}.\n\n"
+                        "Our doctor will reply within a few hours. 💬"
+                    )
+                    new_state = "awaiting_query"
+                    new_temp  = {"query_patient_id": p["id"], "query_doctor_id": d["id"], "query_doctor_name": d["name"]}
+                else:
+                    # 1 patient, 2+ doctors — show doctor selection list
+                    rows = [{"id": f"qdr_{d['id']}", "title": d["name"], "description": d.get("specialty", "")} for d in doctors]
+                    await send_meta_list(
+                        to_number=from_number,
+                        header_text="Ask a Doctor",
+                        body_text=f"Which doctor would you like to ask about {p['name']}?",
+                        button_label="Select Doctor",
+                        sections=[{"title": "Doctors with active prescription", "rows": rows}],
+                        footer_text=clinic_name,
+                    )
+                    new_state = "awaiting_query_doctor_select"
+                    new_temp  = {"query_patient_id": p["id"], "query_doctor_candidates": doctors}
+                    save_conversation_state(from_number, new_state, new_temp)
+                    return None
+            else:
+                # Multiple patients — show patient selection
+                lines = "Your question is for which patient?\n\n"
+                for i, p in enumerate(active_patients, 1):
+                    code = f" ({p['patient_code']})" if p.get("patient_code") else ""
+                    lines += f"{i}. {p['name']}{code}\n"
+                lines += "\nReply with a number."
+                reply     = lines
+                new_state = "awaiting_query_patient_select"
+                new_temp  = {"query_patients": active_patients, "query_active_map": {k: v for k, v in active_map.items()}}
 
     elif intent == "query_patient_selected":
         _patients = temp_data.get("query_patients", [])
+        _active_map = temp_data.get("query_active_map", {})
         try:
             choice = int(t) - 1
             if 0 <= choice < len(_patients):
                 selected = _patients[choice]
-                reply = (
-                    "Please type your question for Dr. Kumar.\n\n"
-                    "Our doctor will reply within a few hours. 💬"
-                )
-                new_state = "awaiting_query"
-                new_temp  = {"query_patient_id": selected["id"]}
+                doctors = _active_map.get(selected["id"], [])
+                if len(doctors) == 1:
+                    d = doctors[0]
+                    reply = (
+                        f"Please type your question for {d['name']}.\n\n"
+                        "Our doctor will reply within a few hours. 💬"
+                    )
+                    new_state = "awaiting_query"
+                    new_temp  = {"query_patient_id": selected["id"], "query_doctor_id": d["id"], "query_doctor_name": d["name"]}
+                elif len(doctors) > 1:
+                    rows = [{"id": f"qdr_{d['id']}", "title": d["name"], "description": d.get("specialty", "")} for d in doctors]
+                    await send_meta_list(
+                        to_number=from_number,
+                        header_text="Ask a Doctor",
+                        body_text=f"Which doctor would you like to ask about {selected['name']}?",
+                        button_label="Select Doctor",
+                        sections=[{"title": "Doctors with active prescription", "rows": rows}],
+                        footer_text=clinic_name,
+                    )
+                    new_state = "awaiting_query_doctor_select"
+                    new_temp  = {"query_patient_id": selected["id"], "query_doctor_candidates": doctors}
+                    save_conversation_state(from_number, new_state, new_temp)
+                    return None
+                else:
+                    reply = "No active prescription found for this patient." + MENU_HINT
+                    new_state = "idle"
             else:
                 lines = "Invalid choice. Which patient?\n\n"
                 for i, p in enumerate(_patients, 1):
@@ -1739,22 +1819,61 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             new_state = "awaiting_query_patient_select"
             new_temp  = temp_data
 
+    elif intent == "query_doctor_selected":
+        _candidates = temp_data.get("query_doctor_candidates", [])
+        _qpid = temp_data.get("query_patient_id")
+        # list_reply comes as "qdr_<uuid>", text reply as a number
+        selected_doc = None
+        if text.startswith("qdr_"):
+            did = text[4:]
+            selected_doc = next((d for d in _candidates if d["id"] == did), None)
+        else:
+            try:
+                idx = int(t) - 1
+                if 0 <= idx < len(_candidates):
+                    selected_doc = _candidates[idx]
+            except (ValueError, IndexError):
+                pass
+        if selected_doc:
+            reply = (
+                f"Please type your question for {selected_doc['name']}.\n\n"
+                "Our doctor will reply within a few hours. 💬"
+            )
+            new_state = "awaiting_query"
+            new_temp  = {"query_patient_id": _qpid, "query_doctor_id": selected_doc["id"], "query_doctor_name": selected_doc["name"]}
+        else:
+            rows = [{"id": f"qdr_{d['id']}", "title": d["name"], "description": d.get("specialty", "")} for d in _candidates]
+            await send_meta_list(
+                to_number=from_number,
+                header_text="Ask a Doctor",
+                body_text="Please select a doctor from the list.",
+                button_label="Select Doctor",
+                sections=[{"title": "Doctors", "rows": rows}],
+                footer_text=clinic_name,
+            )
+            new_state = "awaiting_query_doctor_select"
+            new_temp  = temp_data
+            save_conversation_state(from_number, new_state, new_temp)
+            return None
+
     elif intent == "query_text_provided":
-        query_patient_id = temp_data.get("query_patient_id", patient_id)
+        query_patient_id  = temp_data.get("query_patient_id", patient_id)
+        query_doctor_id   = temp_data.get("query_doctor_id", doctor_id)
+        query_doctor_name = temp_data.get("query_doctor_name", doctor_name)
         try:
             import datetime as _dt
             _supa.table("queries").insert({
                 "patient_id": query_patient_id,
-                "doctor_id":  doctor_id,
+                "doctor_id":  query_doctor_id,
                 "question":   text,
                 "status":     "Pending",
                 "created_at": _dt.datetime.utcnow().isoformat(),
             }).execute()
-            print(f"✅ Query saved for patient {query_patient_id}")
+            print(f"✅ Query saved for patient {query_patient_id} → doctor {query_doctor_id}")
         except Exception as _e:
             print(f"❌ Failed to save query: {_e}")
         reply = (
-            "✅ Your question has been sent to Dr. Kumar!\n\n"
+            f"✅ Your question has been sent to {query_doctor_name}!\n\n"
             "You will receive a reply on WhatsApp within a few hours.\n\n"
             "Reply MENU for main menu."
         )
