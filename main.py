@@ -3475,6 +3475,113 @@ async def update_doctor(doctor_id: str, request: Request):
 
 
 # ── MULTI-DOCTOR API ──────────────────────────────────
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    """PIN-based staff login. Returns JWT token + role info."""
+    from auth import login_staff
+    body = await request.json()
+    username = (body.get("username") or "").strip().lower()
+    pin = (body.get("pin") or "").strip()
+    if not username or not pin:
+        raise HTTPException(status_code=400, detail="username and pin required")
+    result = await login_staff(supabase, username, pin)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid username or PIN")
+    return result
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Validate token and return current staff profile."""
+    from auth import decode_token
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return {
+        "id": payload["sub"],
+        "username": payload["username"],
+        "role": payload["role"],
+        "doctor_id": payload.get("doctor_id"),
+        "clinic_whatsapp": payload["clinic_whatsapp"],
+        "name": payload["name"],
+    }
+
+
+@app.get("/api/staff")
+async def list_staff(request: Request):
+    """List all staff for a clinic. Admin only."""
+    from auth import decode_token
+    auth_header = request.headers.get("Authorization", "")
+    payload = decode_token(auth_header.removeprefix("Bearer ").strip())
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    res = supabase.table("clinic_staff") \
+        .select("id, name, username, role, doctor_id, is_active, created_at") \
+        .eq("clinic_whatsapp", payload["clinic_whatsapp"]) \
+        .order("created_at").execute()
+    return {"staff": res.data or []}
+
+
+@app.post("/api/staff")
+async def create_staff(request: Request):
+    """Create a staff member. Admin only."""
+    from auth import decode_token, hash_pin
+    auth_header = request.headers.get("Authorization", "")
+    payload = decode_token(auth_header.removeprefix("Bearer ").strip())
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    body = await request.json()
+    required = ["name", "username", "pin", "role"]
+    if not all(body.get(k) for k in required):
+        raise HTTPException(status_code=400, detail=f"Required: {required}")
+    valid_roles = {"doctor", "receptionist", "pharmacist", "lab", "admin"}
+    if body["role"] not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"role must be one of {valid_roles}")
+    try:
+        res = supabase.table("clinic_staff").insert({
+            "clinic_whatsapp": payload["clinic_whatsapp"],
+            "doctor_id": body.get("doctor_id") or None,
+            "role": body["role"],
+            "name": body["name"],
+            "username": body["username"].strip().lower(),
+            "pin_hash": hash_pin(body["pin"]),
+            "is_active": True,
+        }).execute()
+        return {"staff": res.data[0]}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/staff/{staff_id}")
+async def update_staff(staff_id: str, request: Request):
+    """Update name, PIN, role, or is_active. Admin only."""
+    from auth import decode_token, hash_pin
+    auth_header = request.headers.get("Authorization", "")
+    payload = decode_token(auth_header.removeprefix("Bearer ").strip())
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    body = await request.json()
+    updates = {}
+    if "name" in body:
+        updates["name"] = body["name"]
+    if "pin" in body and body["pin"]:
+        updates["pin_hash"] = hash_pin(body["pin"])
+    if "role" in body:
+        updates["role"] = body["role"]
+    if "is_active" in body:
+        updates["is_active"] = body["is_active"]
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    res = supabase.table("clinic_staff") \
+        .update(updates) \
+        .eq("id", staff_id) \
+        .eq("clinic_whatsapp", payload["clinic_whatsapp"]) \
+        .execute()
+    return {"staff": res.data[0] if res.data else {}}
+
+
 @app.get("/api/doctors")
 async def list_doctors(clinic_whatsapp: str = None):
     """All active doctors for a clinic WhatsApp number. Used by frontend doctor switcher."""
