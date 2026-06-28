@@ -210,7 +210,9 @@ def _format_appt_button_title(appt: dict) -> str:
     name = appt.get("patient_name", appt.get("name", "Patient"))
     first = name.split()[0]
     token = appt.get("display_token", appt.get("token_number", ""))
-    return f"{first} {token}"[:20]
+    doc_name = appt.get("doctor_name", "")
+    doc_short = f" {doc_name.split()[-1]}" if doc_name else ""  # last word e.g. "Kumar"/"Poornima"
+    return f"{first} {token}{doc_short}"[:20]
 
 
 def _format_appt_time_title(appt: dict) -> str:
@@ -227,7 +229,9 @@ def _format_appt_time_title(appt: dict) -> str:
         display_time = f"{h}{period}"
     except Exception:
         display_time = time_str
-    return f"{first} {display_time}"[:20]
+    doc_name = appt.get("doctor_name", "")
+    doc_short = f" {doc_name.split()[-1]}" if doc_name else ""
+    return f"{first} {display_time}{doc_short}"[:20]
 
 
 def _format_appt_row_description(appt: dict) -> str:
