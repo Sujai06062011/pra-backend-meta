@@ -211,7 +211,7 @@ def _format_appt_button_title(appt: dict) -> str:
     first = name.split()[0]
     token = appt.get("display_token", appt.get("token_number", ""))
     doc_name = appt.get("doctor_name", "")
-    doc_short = f" {doc_name.split()[-1]}" if doc_name else ""  # last word e.g. "Kumar"/"Poornima"
+    doc_short = f" {doc_name.split()[-1]}" if doc_name else ""  # last word e.g. "Kumar"/"Deepa"
     return f"{first} {token}{doc_short}"[:20]
 
 
