@@ -1755,7 +1755,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         header_text="Ask a Doctor",
                         body_text=f"Which doctor would you like to ask about {p['name']}?",
                         button_label="Select Doctor",
-                        sections=[{"title": "Doctors with active prescription", "rows": rows}],
+                        sections=[{"title": "Choose a Doctor", "rows": rows}],
                         footer_text=clinic_name,
                     )
                     new_state = "awaiting_query_doctor_select"
@@ -1796,7 +1796,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         header_text="Ask a Doctor",
                         body_text=f"Which doctor would you like to ask about {selected['name']}?",
                         button_label="Select Doctor",
-                        sections=[{"title": "Doctors with active prescription", "rows": rows}],
+                        sections=[{"title": "Choose a Doctor", "rows": rows}],
                         footer_text=clinic_name,
                     )
                     new_state = "awaiting_query_doctor_select"
