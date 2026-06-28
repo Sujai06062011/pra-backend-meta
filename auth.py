@@ -39,16 +39,22 @@ async def login_staff(supabase, username: str, pin: str) -> dict | None:
     """Return staff record + token if credentials are valid, else None."""
     try:
         pin_hash = hash_pin(pin)
+        print(f"[AUTH] querying clinic_staff username={username} hash={pin_hash}")
+        # First fetch by username only, then check pin_hash manually
+        # (avoids any query-level issues with hashed value matching)
         res = supabase.table("clinic_staff") \
             .select("*") \
             .eq("username", username.strip().lower()) \
-            .eq("pin_hash", pin_hash) \
             .eq("is_active", True) \
             .limit(1).execute()
         rows = res.data or []
+        print(f"[AUTH] rows found={len(rows)}")
         if not rows:
             return None
         staff = rows[0]
+        if staff.get("pin_hash") != pin_hash:
+            print(f"[AUTH] pin mismatch stored={staff.get('pin_hash')} computed={pin_hash}")
+            return None
         token = create_token(staff)
         return {
             "token": token,
