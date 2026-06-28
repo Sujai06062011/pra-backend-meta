@@ -276,7 +276,9 @@ async def send_cancel_appointment_list(
             })
             desc = _format_appt_row_description(appt_with_tok)
             name = appt.get("patient_name", appt.get("name", ""))
-            body_lines.append(f"{i}. {name} — {desc}")
+            doc_name = appt.get("doctor_name", "")
+            doc_suffix = f" · {doc_name}" if doc_name else ""
+            body_lines.append(f"{i}. {name}{doc_suffix} — {desc}")
         body_lines.append("\nWhich would you like to cancel?")
         await send_meta_buttons(
             to_number=from_number,
@@ -288,9 +290,11 @@ async def send_cancel_appointment_list(
         rows = []
         for appt in appointments[:9]:
             name = appt.get("patient_name", appt.get("name", "Patient"))
+            doc_name = appt.get("doctor_name", "")
+            title = (f"{name} · {doc_name}" if doc_name else name)[:24]
             rows.append({
                 "id": f"cancel_{appt['id']}",
-                "title": name[:24],
+                "title": title,
                 "description": _format_appt_row_description(appt),
             })
         await send_meta_list(
@@ -1609,7 +1613,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
 
     # ── CANCEL APPOINTMENT ────────────────────────────────────
     elif intent == "cancel":
-        appointments = get_family_upcoming_appointments(from_number, doctor_id)
+        appointments = get_family_upcoming_appointments(from_number, doctor_id, clinic_whatsapp=to_number)
         if not appointments:
             reply     = "You have no upcoming appointments to cancel.\n\nReply 1 to book an appointment."
             new_state = "idle"

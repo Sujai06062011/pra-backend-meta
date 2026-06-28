@@ -380,11 +380,12 @@ def get_upcoming_appointments(patient_id: str, doctor_id: str):
     return result.data
 
 
-def get_family_upcoming_appointments(mobile: str, doctor_id: str):
+def get_family_upcoming_appointments(mobile: str, doctor_id: str, clinic_whatsapp: str = None):
     """
     Get cancellable appointments for every patient linked to this mobile.
     - Today: only Waiting (token > in_progress). Done/In Progress are already seen.
     - Future dates: all Confirmed appointments.
+    When clinic_whatsapp is provided, includes appointments across all doctors at that clinic.
     Returns list with 'patient_name' key, sorted by date/token.
     """
     from datetime import date
@@ -397,32 +398,56 @@ def get_family_upcoming_appointments(mobile: str, doctor_id: str):
     if not all_patients:
         return []
 
+    # Build the list of doctor IDs to query — include all clinic doctors when multi-doctor
+    doctor_ids = [doctor_id]
+    if clinic_whatsapp:
+        try:
+            clinic_num = clinic_whatsapp.replace("+", "")
+            dr_res = supabase.table("doctors").select("id").eq("whatsapp_number", clinic_num).eq("is_available", True).execute()
+            doctor_ids = [r["id"] for r in (dr_res.data or [])] or [doctor_id]
+        except Exception:
+            pass
+
     result = supabase.table("appointments").select(
-        "id, patient_id, appointment_date, appointment_time, token_number, status"
-    ).eq("doctor_id", doctor_id).eq("status", "Confirmed").gte(
+        "id, patient_id, doctor_id, appointment_date, appointment_time, token_number, status"
+    ).in_("doctor_id", doctor_ids).eq("status", "Confirmed").gte(
         "appointment_date", today
     ).in_("patient_id", list(all_patients.keys())).order("appointment_date").order(
         "appointment_time"
-    ).limit(10).execute()
+    ).limit(20).execute()
 
-    # Today's serving slot time — appointments at or before it can't be cancelled
-    token_row = supabase.table("tokens").select("current_token").eq(
-        "doctor_id", doctor_id).eq("queue_date", today).execute()
-    current = token_row.data[0]["current_token"] if token_row.data else 0
-    serving_time = ""
-    if current:
-        srow = supabase.table("appointments").select("appointment_time").eq(
-            "doctor_id", doctor_id).eq("appointment_date", today).eq(
-            "token_number", current).limit(1).execute()
-        serving_time = _time_str(srow.data[0]["appointment_time"]) if srow.data else ""
+    # Today's serving slot time per doctor — appointments at or before it can't be cancelled
+    token_rows = supabase.table("tokens").select("doctor_id, current_token").in_(
+        "doctor_id", doctor_ids).eq("queue_date", today).execute()
+    current_by_doc = {r["doctor_id"]: r["current_token"] for r in (token_rows.data or [])}
+    current = current_by_doc.get(doctor_id, 0)
+    # Build serving_time per doctor for today's already-served slot filtering
+    serving_times = {}
+    for did, cur_tok in current_by_doc.items():
+        if cur_tok:
+            srow = supabase.table("appointments").select("appointment_time").eq(
+                "doctor_id", did).eq("appointment_date", today).eq(
+                "token_number", cur_tok).limit(1).execute()
+            if srow.data:
+                serving_times[did] = _time_str(srow.data[0]["appointment_time"])
+
+    # Fetch doctor names for display
+    try:
+        dr_names_res = supabase.table("doctors").select("id, name").in_("id", doctor_ids).execute()
+        doctor_names = {r["id"]: r["name"] for r in (dr_names_res.data or [])}
+    except Exception:
+        doctor_names = {}
 
     appts = []
     for a in (result.data or []):
+        appt_doc_id = a.get("doctor_id", doctor_id)
+        serving_time = serving_times.get(appt_doc_id, "")
         # For today: skip slots already seen or being seen
         if a["appointment_date"] == today and serving_time:
             if _time_str(a.get("appointment_time")) <= serving_time:
                 continue
         a["patient_name"] = all_patients.get(a["patient_id"], "Patient")
+        a["doctor_name"]  = doctor_names.get(appt_doc_id, "")
         appts.append(a)
     return appts
 
