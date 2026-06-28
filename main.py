@@ -3452,8 +3452,8 @@ async def answer_query(query_id: str, request: Request):
                     f"👨‍⚕️ *{_reply_clinic_name}*\n\n"
                     f"Patient: *{patient_code}*\n\n"
                     f"{_reply_doctor_name} has replied to your question:\n\n"
-                    f"*Your question:* _{question_text}_\n"
-                    f"*{_reply_doctor_name}'s reply:* _{reply_text}_\n\n"
+                    f"*Your question:* {question_text}\n"
+                    f"*{_reply_doctor_name}'s reply:* {reply_text}\n\n"
                     f"Reply MENU for main menu."
                 )
                 await send_meta_text(mobile, msg)
