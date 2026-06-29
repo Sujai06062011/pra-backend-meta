@@ -806,10 +806,10 @@ async def meta_webhook_inbound(request: Request):
                 else:
                     list_id_to_text = {
                         "menu_book_appointment":  "1",
-                        "menu_queue_status":      "2",
-                        "menu_cancel_appointment": "3",
-                        "menu_clinic_timings":    "4",
-                        "menu_receptionist":      "5",
+                        "menu_my_appointments":   "2",
+                        "menu_queue_status":      "3",
+                        "menu_cancel_appointment": "4",
+                        "menu_clinic_timings":    "5",
                         "menu_ask_doctor":        "6",
                     }
                     mapped_text = list_id_to_text.get(list_id, "MENU")

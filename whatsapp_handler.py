@@ -427,10 +427,10 @@ def get_main_menu_sections() -> list:
             "title": "Clinic Services",
             "rows": [
                 {"id": "menu_book_appointment",   "title": "Book Appointment",      "description": "Schedule an in-clinic or online visit"},
+                {"id": "menu_my_appointments",     "title": "My Appointments",        "description": "View your upcoming bookings"},
                 {"id": "menu_queue_status",        "title": "Queue Status",           "description": "Check your position in today's queue"},
                 {"id": "menu_cancel_appointment",  "title": "Cancel Appointment",     "description": "Cancel an existing booking"},
                 {"id": "menu_clinic_timings",      "title": "Clinic Timings",         "description": "View our opening hours"},
-                {"id": "menu_receptionist",        "title": "Speak to Receptionist",  "description": "Connect with our front desk"},
                 {"id": "menu_ask_doctor",          "title": "Ask Doctor a Question",  "description": "Send a medical query to the doctor"},
             ],
         }
@@ -745,15 +745,15 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "media"
     elif t == "1" or any(k in t for k in ["book", "appointment"]):
         intent = "book"
-    elif t == "2" or any(k in t for k in ["queue", "status", "token", "wait"]):
+    elif t == "2" or any(k in t for k in ["my appointments", "upcoming", "my appt"]):
+        intent = "my_appointments"
+    elif t == "3" or any(k in t for k in ["queue", "status", "token", "wait"]):
         intent = "queue"
-    elif t == "3" or "cancel" in t:
+    elif t == "4" or "cancel" in t:
         intent = "cancel"
-    elif t == "4" or any(k in t for k in ["timing", "hour", "open", "close"]):
+    elif t == "5" or any(k in t for k in ["timing", "hour", "open", "close"]):
         intent = "timing"
-    elif t == "5" or any(k in t for k in ["speak", "receptionist", "staff"]):
-        intent = "speak"
-    elif t == "6" or any(k in t for k in ["ask", "question", "query", "doctor"]):
+    elif t == "6" or any(k in t for k in ["ask", "question", "query"]):
         intent = "ask_question"
 
     # ── BUILD REPLY ───────────────────────────────────────────
@@ -1738,14 +1738,50 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         )
         new_state = "idle"
 
-    # ── SPEAK TO RECEPTIONIST ─────────────────────────────────
-    elif intent == "speak":
-        reply = (
-            f"Our team will contact you shortly. 📞\n\n"
-            f"Clinic hours: {clinic_timings}\n\n"
-            f"Alternatively reply 1 to book online."
-            + MENU_HINT
-        )
+    # ── MY APPOINTMENTS ───────────────────────────────────────
+    elif intent == "my_appointments":
+        own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
+        fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()
+        my_ids = list({p["id"] for p in (own.data or []) + (fam.data or [])})
+
+        upcoming = []
+        if my_ids:
+            from datetime import date as _date
+            today = _date.today().isoformat()
+            res = _supa.table("appointments").select(
+                "appointment_date, appointment_time, patient_id, doctor_id, "
+                "patients(name), doctors(name, speciality)"
+            ).in_("patient_id", my_ids).neq(
+                "status", "Cancelled"
+            ).neq("status", "Completed").gte(
+                "appointment_date", today
+            ).order("appointment_date").order("appointment_time").execute()
+            upcoming = res.data or []
+
+        if upcoming:
+            months = ["Jan","Feb","Mar","Apr","May","Jun",
+                      "Jul","Aug","Sep","Oct","Nov","Dec"]
+            lines = ["📅 Your upcoming appointments:\n"]
+            for i, a in enumerate(upcoming, 1):
+                pat_name = (a.get("patients") or {}).get("name", "Patient")
+                doc = a.get("doctors") or {}
+                doc_name = doc.get("name", "Doctor")
+                specialty = doc.get("speciality", "")
+                doc_label = f"Dr. {doc_name.split()[-1]}" + (f" ({specialty})" if specialty else "")
+                try:
+                    d = _date.fromisoformat(str(a["appointment_date"])[:10])
+                    date_str = f"{d.day} {months[d.month-1]}"
+                except Exception:
+                    date_str = str(a["appointment_date"])[:10]
+                time_str = format_time(str(a.get("appointment_time", ""))[:5])
+                lines.append(f"{i}. {pat_name} — {date_str} {time_str} with {doc_label}")
+            reply = "\n".join(lines) + MENU_HINT
+        else:
+            reply = (
+                "📅 You have no upcoming appointments.\n\n"
+                "Reply 1 to book an appointment."
+                + MENU_HINT
+            )
         new_state = "idle"
 
     # ── ASK DOCTOR A QUESTION ─────────────────────────────────
