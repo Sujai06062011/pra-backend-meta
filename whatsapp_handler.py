@@ -1711,9 +1711,27 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
     # ── CLINIC TIMINGS ────────────────────────────────────────
     elif intent == "timing":
         address_line = f"\nAddress: {clinic_address}" if clinic_address else ""
+        try:
+            all_docs = _supa.table("doctors").select(
+                "name, speciality, clinic_timings"
+            ).eq("is_available", True).execute().data or []
+        except Exception:
+            all_docs = []
+
+        if all_docs and len(all_docs) > 1:
+            doc_lines = []
+            for d in all_docs:
+                specialty = d.get("speciality", "")
+                timings = d.get("clinic_timings", "")
+                label = f"👨‍⚕️ {d['name']}" + (f" ({specialty})" if specialty else "")
+                doc_lines.append(f"{label}\n{timings}" if timings else label)
+            timing_body = "\n\n".join(doc_lines)
+        else:
+            timing_body = clinic_timings
+
         reply = (
             f"{clinic_name} Timings 🕐\n\n"
-            f"{clinic_timings}"
+            f"{timing_body}"
             f"{address_line}\n\n"
             f"Reply 1 for appointment."
             + MENU_HINT
