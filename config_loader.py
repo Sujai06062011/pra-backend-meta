@@ -21,18 +21,18 @@ _sb = create_client(
 DOCTOR_ID = "8c33abe0-5d2e-4613-9437-c7c375e8d162"
 
 # Simple in-process cache so every job function doesn't hit the DB
-_cache: dict = {}
-_cache_loaded = False
+# Keyed by doctor_id so per-doctor scheduler works correctly
+_cache: dict[str, dict] = {}
 
 
 def load_config(doctor_id: str = DOCTOR_ID) -> dict:
     """
     Fetch all config rows for a doctor and return as a typed dict.
-    Caches result in-process; call invalidate_cache() to refresh.
+    Caches result in-process per doctor; call invalidate_cache() to refresh.
     """
-    global _cache, _cache_loaded
-    if _cache_loaded and doctor_id == DOCTOR_ID:
-        return _cache
+    global _cache
+    if doctor_id in _cache:
+        return _cache[doctor_id]
 
     try:
         result = _sb.table("clinic_config") \
@@ -55,9 +55,7 @@ def load_config(doctor_id: str = DOCTOR_ID) -> dict:
             else:
                 config[key] = value
 
-        if doctor_id == DOCTOR_ID:
-            _cache = config
-            _cache_loaded = True
+        _cache[doctor_id] = config
 
         print(f"✅ Config loaded: {len(config)} keys for doctor {doctor_id[:8]}...")
         return config
@@ -69,9 +67,8 @@ def load_config(doctor_id: str = DOCTOR_ID) -> dict:
 
 def invalidate_cache():
     """Force next call to load_config() to re-fetch from DB."""
-    global _cache, _cache_loaded
+    global _cache
     _cache = {}
-    _cache_loaded = False
     print("🔄 Config cache invalidated")
 
 

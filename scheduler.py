@@ -30,22 +30,26 @@ async def send_whatsapp(to_number: str, message: str):
         return False
 
 
-def get_active_medicines_by_patient(reminder_type: str = "morning"):
+def get_active_medicines_by_patient(reminder_type: str = "morning", doctor_id: str = None):
     """
     Fetch all active medicines grouped by patient_id.
     reminder_type: "morning" = all medicines, "evening" = night medicines only
+    doctor_id: if provided, only fetch prescriptions for this doctor
     Returns: dict of {patient_id: {mobile, patient_info, medicines: []}}
     """
     today = date.today()
 
-    # Fetch all prescriptions with medicines and patient info
-    result = supabase.table("prescriptions").select(
+    # Fetch prescriptions with medicines and patient info
+    q = supabase.table("prescriptions").select(
         "id, prescription_date, dietary_instructions, "
-        "patient_id, "
+        "patient_id, doctor_id, "
         "patients(name, mobile), "
         "doctors(clinic_name), "
         "prescription_medicines(medicine_name, dosage, morning, afternoon, evening, night, before_food, duration_days, instructions, sort_order)"
-    ).execute()
+    )
+    if doctor_id:
+        q = q.eq("doctor_id", doctor_id)
+    result = q.execute()
 
     prescriptions = result.data or []
 
@@ -190,45 +194,31 @@ def build_evening_message(data: dict) -> str:
     return "\n".join(lines)
 
 
-async def send_morning_reminders():
-    """
-    8AM Job: Send full day medicine summary to all patients
-    with active prescriptions. One message per patient.
-    """
-    print("🌅 Running: Morning Medicine Reminder Job")
-
-    patients_medicines = get_active_medicines_by_patient("morning")
-    print(f"Found {len(patients_medicines)} patients with active medicines")
-
-    for patient_id, data in patients_medicines.items():
-        mobile = data["mobile"]
-        message = build_morning_message(data)
-        await send_whatsapp(mobile, message)
-        print(f"✅ Morning reminder sent to {data['patient_name']} ({mobile})")
+def make_morning_reminder_job(doctor_id: str):
+    async def send_morning_reminders():
+        print(f"🌅 Running: Morning Medicine Reminder Job for doctor {doctor_id[:8]}")
+        patients_medicines = get_active_medicines_by_patient("morning", doctor_id=doctor_id)
+        print(f"Found {len(patients_medicines)} patients with active medicines")
+        for patient_id, data in patients_medicines.items():
+            mobile = data["mobile"]
+            message = build_morning_message(data)
+            await send_whatsapp(mobile, message)
+            print(f"✅ Morning reminder sent to {data['patient_name']} ({mobile})")
+    return send_morning_reminders
 
 
-async def send_evening_reminders():
-    """
-    8PM Job: Send night medicine reminder only if patient
-    has night medicines. One message per patient.
-    """
-    print("🌙 Running: Evening Medicine Reminder Job")
-
-    patients_medicines = get_active_medicines_by_patient("evening")
-
-    # Filter only patients who have night medicines
-    night_patients = {
-        pid: data for pid, data in patients_medicines.items()
-        if data["night"]
-    }
-
-    print(f"Found {len(night_patients)} patients with night medicines")
-
-    for patient_id, data in night_patients.items():
-        mobile = data["mobile"]
-        message = build_evening_message(data)
-        await send_whatsapp(mobile, message)
-        print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
+def make_evening_reminder_job(doctor_id: str):
+    async def send_evening_reminders():
+        print(f"🌙 Running: Evening Medicine Reminder Job for doctor {doctor_id[:8]}")
+        patients_medicines = get_active_medicines_by_patient("evening", doctor_id=doctor_id)
+        night_patients = {pid: data for pid, data in patients_medicines.items() if data["night"]}
+        print(f"Found {len(night_patients)} patients with night medicines")
+        for patient_id, data in night_patients.items():
+            mobile = data["mobile"]
+            message = build_evening_message(data)
+            await send_whatsapp(mobile, message)
+            print(f"✅ Evening reminder sent to {data['patient_name']} ({mobile})")
+    return send_evening_reminders
 
 
 async def get_all_active_doctors() -> list:
@@ -270,10 +260,11 @@ async def send_visit_summary():
                 continue
             patient = visit.get("patients", {})
             doctor  = visit.get("doctors", {})
+            visit_doctor_id = visit.get("doctor_id", "")
             patient_name = patient.get("name", "Patient")
             mobile = patient.get("mobile", "")
-            _clinic_name  = config_loader.clinic_name() or doctor.get("clinic_name", "Clinic")
-            _doctor_name  = config_loader.doctor_name() or doctor.get("name", "Doctor")
+            _clinic_name  = config_loader.clinic_name(visit_doctor_id) or doctor.get("clinic_name", "Clinic")
+            _doctor_name  = config_loader.doctor_name(visit_doctor_id) or doctor.get("name", "Doctor")
             follow_up = visit.get("follow_up_date", "")
             diagnosis = visit.get("diagnosis", "")
 
@@ -375,73 +366,66 @@ async def send_review_requests():
             print(f"❌ Error sending review request: {e}")
 
 
-async def init_scheduler() -> AsyncIOScheduler:
-    """
-    Initialize scheduler with times and feature flags loaded from clinic_config DB.
-    Each job is only registered if its feature flag is enabled.
-    """
+def _populate_scheduler(scheduler: AsyncIOScheduler):
+    """Add per-doctor jobs to the scheduler. Called by init and reschedule."""
     from followup import send_followup_whatsapp_job, make_followup_calls_job
 
-    # Warm the config cache once
-    config_loader.load_config()
+    # Fetch all active doctors
+    try:
+        doctors_res = supabase.table("doctors").select("id, name").eq("is_available", True).execute()
+        doctors = doctors_res.data or []
+    except Exception as e:
+        print(f"⚠️ Failed to fetch doctors for scheduler: {e}")
+        doctors = []
 
+    if not doctors:
+        print("⚠️ No active doctors found — scheduler will be empty")
+        return
+
+    print(f"⏰ Scheduling jobs for {len(doctors)} doctor(s):")
+
+    for doc in doctors:
+        did = doc["id"]
+        dname = doc["name"]
+        short = did[:8]
+
+        def add(feature, job_id, label, func):
+            if not config_loader.is_enabled(feature, did):
+                print(f"   ⏭️  [{dname}] {label} disabled")
+                return
+            h, m = config_loader.get_scheduler_time(job_id, did)
+            scheduler.add_job(
+                func,
+                CronTrigger(hour=h, minute=m, timezone="Asia/Kolkata"),
+                id=f"{job_id}_{short}",
+                name=f"{label} [{dname}]",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            print(f"   ✅ [{dname}] {label}: {h:02d}:{m:02d} IST")
+
+        add("morning_reminders", "morning_reminders", "Morning Reminders",   make_morning_reminder_job(did))
+        add("evening_reminders", "evening_reminders", "Evening Reminders",   make_evening_reminder_job(did))
+        add("visit_summary",     "visit_summary",     "Visit Summary",       send_visit_summary)
+        add("review_requests",   "review_requests",   "Review Requests",     send_review_requests)
+        add("followup_whatsapp", "followup_whatsapp", "Followup WhatsApp",   send_followup_whatsapp_job)
+        add("followup_calls",    "followup_calls",    "Followup Calls",      make_followup_calls_job)
+
+
+async def init_scheduler() -> AsyncIOScheduler:
+    """
+    Initialize per-doctor scheduler. Each doctor gets their own set of jobs
+    running at their configured times with their feature flags.
+    """
+    config_loader.invalidate_cache()
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-
-    def add_job_if_enabled(feature: str, job_id: str, job_name: str, func):
-        if not config_loader.is_enabled(feature):
-            print(f"⏭️  {job_name} disabled (feature.{feature}.enabled=false)")
-            return
-        h, m = config_loader.get_scheduler_time(job_id)
-        scheduler.add_job(
-            func,
-            CronTrigger(hour=h, minute=m, timezone="Asia/Kolkata"),
-            id=job_id,
-            name=job_name,
-            replace_existing=True,
-            misfire_grace_time=300  # fire even if up to 5 min late (e.g. after reload)
-        )
-        print(f"   ✅ {job_name}: {h:02d}:{m:02d} IST")
-
-    print("⏰ Initializing scheduler from DB config:")
-    add_job_if_enabled("morning_reminders",  "morning_reminders",  "Morning Medicine Reminders",    send_morning_reminders)
-    add_job_if_enabled("evening_reminders",  "evening_reminders",  "Evening Night Medicine Reminders", send_evening_reminders)
-    add_job_if_enabled("visit_summary",      "visit_summary",      "Evening Visit Summary",          send_visit_summary)
-    add_job_if_enabled("review_requests",    "review_requests",    "Day 7 Review Requests",          send_review_requests)
-    add_job_if_enabled("followup_whatsapp",  "followup_whatsapp",  "Follow-up WhatsApp",             send_followup_whatsapp_job)
-    add_job_if_enabled("followup_calls",     "followup_calls",     "Follow-up Voice Calls",          make_followup_calls_job)
-
+    _populate_scheduler(scheduler)
     return scheduler
 
 
 async def reschedule(scheduler: AsyncIOScheduler):
-    """
-    Remove all existing jobs and re-add with fresh config from DB.
-    Called by /config/reload-scheduler endpoint.
-    """
+    """Remove all jobs and re-add with fresh config. Called by /config/reload-scheduler."""
     config_loader.invalidate_cache()
     scheduler.remove_all_jobs()
-    await init_scheduler.__wrapped__(scheduler) if hasattr(init_scheduler, "__wrapped__") else None
-    # Simpler: just re-populate jobs inline
-    from followup import send_followup_whatsapp_job, make_followup_calls_job
-    config_loader.load_config()
-
-    def re_add(feature: str, job_id: str, job_name: str, func):
-        if not config_loader.is_enabled(feature):
-            return
-        h, m = config_loader.get_scheduler_time(job_id)
-        scheduler.add_job(
-            func,
-            CronTrigger(hour=h, minute=m, timezone="Asia/Kolkata"),
-            id=job_id,
-            name=job_name,
-            replace_existing=True,
-            misfire_grace_time=300  # fire even if up to 5 min late
-        )
-
-    re_add("morning_reminders", "morning_reminders", "Morning Medicine Reminders",       send_morning_reminders)
-    re_add("evening_reminders", "evening_reminders", "Evening Night Medicine Reminders",  send_evening_reminders)
-    re_add("visit_summary",     "visit_summary",     "Evening Visit Summary",             send_visit_summary)
-    re_add("review_requests",   "review_requests",   "Day 7 Review Requests",             send_review_requests)
-    re_add("followup_whatsapp", "followup_whatsapp", "Follow-up WhatsApp",                send_followup_whatsapp_job)
-    re_add("followup_calls",    "followup_calls",    "Follow-up Voice Calls",             make_followup_calls_job)
-    print("🔄 Scheduler reloaded with fresh DB config")
+    _populate_scheduler(scheduler)
+    print("🔄 Scheduler reloaded with fresh per-doctor config")
