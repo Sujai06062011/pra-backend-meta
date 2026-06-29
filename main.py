@@ -921,7 +921,7 @@ async def meta_webhook_inbound(request: Request):
                             cancel_appointment(appointment_id)
 
                             appt_res = supabase.table("appointments").select(
-                                "appointment_date, appointment_time, token_number, patients(name)"
+                                "appointment_date, appointment_time, token_number, doctor_id, patients(name)"
                             ).eq("id", appointment_id).single().execute()
 
                             if appt_res.data:
