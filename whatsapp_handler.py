@@ -1,5 +1,6 @@
 from datetime import datetime, date, timedelta
 import re
+import config_loader
 from consultation_helpers import (
     is_online_consultation_slot,
     create_consultation_for_appointment,
