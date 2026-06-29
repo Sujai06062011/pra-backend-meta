@@ -1018,7 +1018,7 @@ async def meta_webhook_inbound(request: Request):
                                 "Sorry to hear you're still recovering. 🙏\n\n"
                                 "Would you like to book an appointment with the doctor?",
                                 [
-                                    {"id": f"fu_book_yes__{followup_id}", "title": "Yes, book appointment"},
+                                    {"id": f"fu_book_yes__{followup_id}", "title": "Yes, book now"},
                                     {"id": f"fu_book_no__{followup_id}",  "title": "No, I'll wait"},
                                 ]
                             )
