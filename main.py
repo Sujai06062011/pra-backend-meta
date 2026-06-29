@@ -3590,8 +3590,8 @@ async def analytics_summary():
 
     # ── 2. Total registered patients (clinic-wide) + seen this month ──
     month_appts = [a for a in all_appts if month_start <= (a.get("appointment_date") or "") <= month_end]
-    total_patients_res = supabase.table("patients").select("id", count="exact").execute()
-    total_patients_month = total_patients_res.count or 0
+    total_patients_res = supabase.table("patients").select("*", count="exact").execute()
+    total_patients_month = total_patients_res.count if total_patients_res.count is not None else len(total_patients_res.data or [])
     patients_seen_month = len(set(a["patient_id"] for a in month_appts if a.get("patient_id")))
 
     # ── 3. Avg daily appts this month ──
