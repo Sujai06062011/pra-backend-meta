@@ -3588,9 +3588,11 @@ async def analytics_summary():
     ).execute()
     all_appts = appts_res.data or []
 
-    # ── 2. Total patients this month ──
+    # ── 2. Total registered patients (clinic-wide) + seen this month ──
     month_appts = [a for a in all_appts if month_start <= (a.get("appointment_date") or "") <= month_end]
-    total_patients_month = len(set(a["patient_id"] for a in month_appts if a.get("patient_id")))
+    total_patients_res = supabase.table("patients").select("id", count="exact").execute()
+    total_patients_month = total_patients_res.count or 0
+    patients_seen_month = len(set(a["patient_id"] for a in month_appts if a.get("patient_id")))
 
     # ── 3. Avg daily appts this month ──
     from collections import defaultdict
@@ -3751,13 +3753,15 @@ async def analytics_summary():
     prev_month_start = month_start_for(months[-2]) if len(months) >= 2 else month_start
     prev_month_end   = month_end_for(months[-2])   if len(months) >= 2 else month_start
     prev_appts = [a for a in all_appts if prev_month_start <= (a.get("appointment_date") or "") <= prev_month_end]
-    prev_patients = len(set(a["patient_id"] for a in prev_appts if a.get("patient_id")))
     prev_daily_counts = defaultdict(int)
     for a in prev_appts:
         d = a.get("appointment_date")
         if d:
             prev_daily_counts[d] += 1
     prev_avg_daily = round(sum(prev_daily_counts.values()) / max(len(prev_daily_counts), 1), 1)
+    # New patients registered last month vs this month for change %
+    new_this_month = sum(1 for pid, fd in patient_first.items() if month_start <= fd <= month_end)
+    new_prev_month = sum(1 for pid, fd in patient_first.items() if prev_month_start <= fd <= prev_month_end)
 
     def change_pct(curr, prev):
         if prev == 0:
@@ -3767,7 +3771,8 @@ async def analytics_summary():
     return {
         "kpis": {
             "total_patients_month": total_patients_month,
-            "total_patients_change": change_pct(total_patients_month, prev_patients),
+            "patients_seen_month": patients_seen_month,
+            "total_patients_change": change_pct(new_this_month, new_prev_month),
             "avg_daily_appts": avg_daily,
             "avg_daily_change": change_pct(avg_daily, prev_avg_daily),
             "avg_satisfaction": avg_satisfaction,
