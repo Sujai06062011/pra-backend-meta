@@ -1382,45 +1382,47 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 )
                 new_state = "idle"
 
-                # ── Online auto-create fallback (for in-clinic slots that happen to be in online hours) ──
+                # ── Online auto-create: only if patient explicitly chose online ──
                 print(f"[BOOKING CONFIRMED] date={parsed_date} time={selected_slot} "
                       f"doctor={doctor_id} patient={booking_for}")
-                try:
-                    _pat_lang_res = _supa.table("patients").select("language") \
-                        .eq("id", booking_for).single().execute()
-                    _pat_lang = (_pat_lang_res.data or {}).get("language", "english") or "english"
+                if consult_type == "in_clinic":
+                    print(f"[ONLINE CHECK SKIPPED] consult_type=in_clinic, no video link")
+                else:
+                    try:
+                        _pat_lang_res = _supa.table("patients").select("language") \
+                            .eq("id", booking_for).single().execute()
+                        _pat_lang = (_pat_lang_res.data or {}).get("language", "english") or "english"
 
-                    _is_online = await is_online_consultation_slot(
-                        supabase=_supa,
-                        doctor_id=doctor_id,
-                        appointment_date=parsed_date,
-                        appointment_time=selected_slot,
-                    )
-
-                    if _is_online and appt_id:
-                        _consult = await create_consultation_for_appointment(
+                        _is_online = await is_online_consultation_slot(
                             supabase=_supa,
                             doctor_id=doctor_id,
-                            patient_id=booking_for,
-                            appointment_id=appt_id,
                             appointment_date=parsed_date,
                             appointment_time=selected_slot,
-                            chief_complaint="",
                         )
-                        if _consult:
-                            await send_video_link_to_patient(
-                                mobile=from_number,
-                                room_url=_consult["room_url"],
-                                appointment_time=selected_slot,
+
+                        if _is_online and appt_id:
+                            _consult = await create_consultation_for_appointment(
+                                supabase=_supa,
+                                doctor_id=doctor_id,
+                                patient_id=booking_for,
+                                appointment_id=appt_id,
                                 appointment_date=parsed_date,
-                                language=_pat_lang,
+                                appointment_time=selected_slot,
+                                chief_complaint="",
                             )
-                            print(f"[ONLINE CONSULTATION] Video link sent to {from_number}")
-                except Exception as _oc_err:
-                    import traceback
-                    print(f"[ONLINE CHECK ERROR] {_oc_err}")
-                    traceback.print_exc()
-                # ── End online consultation block ────────────────────────────
+                            if _consult:
+                                await send_video_link_to_patient(
+                                    mobile=from_number,
+                                    room_url=_consult["room_url"],
+                                    appointment_time=selected_slot,
+                                    appointment_date=parsed_date,
+                                    language=_pat_lang,
+                                )
+                                print(f"[ONLINE CONSULTATION] Video link sent to {from_number}")
+                    except Exception as _oc_err:
+                        import traceback
+                        print(f"[ONLINE CHECK ERROR] {_oc_err}")
+                        traceback.print_exc()
         except (IndexError, ValueError):
             reply     = "Invalid choice. Please reply with a number from the list."
             new_state = "awaiting_slot"
