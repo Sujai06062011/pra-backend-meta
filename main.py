@@ -482,7 +482,7 @@ async def handle_member_interactive(from_number: str, selection_id: str, clinic_
 async def handle_appointment_cancel(from_number: str, appointment_id: str):
     """Show a confirm/keep confirmation before cancelling an appointment."""
     appt_res = supabase.table("appointments").select(
-        "id, appointment_date, appointment_time, token_number, consultation_type, patients(name)"
+        "id, appointment_date, appointment_time, token_number, doctor_id, consultation_type, patients(name)"
     ).eq("id", appointment_id).single().execute()
 
     if not appt_res.data:
