@@ -1489,167 +1489,175 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         now_ist = datetime.now(pytz.timezone("Asia/Kolkata"))
         today_ist = now_ist.date().isoformat()
 
-        # 1. Current token from tokens session row (0 = not started)
-        tok_res = _supa.table("tokens").select("current_token").eq(
-            "doctor_id", doctor_id
-        ).eq("queue_date", today_ist).execute()
-        current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
-
-        # Self-heal stale session: served token must exist in today's appointments
-        if current_token:
-            chk = _supa.table("appointments").select("id").eq(
-                "doctor_id", doctor_id
-            ).eq("appointment_date", today_ist).eq("token_number", current_token).execute()
-            if not chk.data:
-                current_token = 0
-                _supa.table("tokens").update({"current_token": 0}).eq(
-                    "doctor_id", doctor_id).eq("queue_date", today_ist).execute()
-
-        # 2. ALL of this mobile's appointments today (self + family members)
+        # All patient IDs for this mobile (self + family)
         own = _supa.table("patients").select("id").eq("mobile", from_number).execute()
         fam = _supa.table("patients").select("id").eq("family_head_mobile", from_number).execute()
         my_ids = list({p["id"] for p in (own.data or []) + (fam.data or [])})
 
-        clinic_appts = []
-        online_appts = []
+        # Fetch ALL today's appointments across ALL doctors for this mobile
+        all_my_appts = []
         if my_ids:
-            # In-clinic appointments only
-            clinic_res = _supa.table("appointments").select(
-                "token_number, status, appointment_time, patient_id, patients(name)"
-            ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).neq(
+            all_res = _supa.table("appointments").select(
+                "id, token_number, status, appointment_time, patient_id, doctor_id, consultation_type, patients(name), doctors(name, clinic_name, speciality)"
+            ).eq("appointment_date", today_ist).neq(
                 "status", "Cancelled"
-            ).neq("consultation_type", "online").in_(
-                "patient_id", my_ids
-            ).order("token_number").execute()
-            clinic_appts = clinic_res.data or []
+            ).in_("patient_id", my_ids).execute()
+            all_my_appts = all_res.data or []
 
-            # Online appointments only
-            online_res = _supa.table("appointments").select(
-                "id, appointment_time, patient_id, patients(name)"
-            ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).eq(
-                "consultation_type", "online"
-            ).neq("status", "Cancelled").in_("patient_id", my_ids).execute()
-            online_appts = online_res.data or []
-
-        if not clinic_appts and not online_appts:
+        if not all_my_appts:
             reply = (
                 "You have no appointment today.\n"
                 "Reply 1 to book an appointment."
             )
         else:
             lines = []
+            cfg = get_slot_config()
+            slot_min = cfg["duration"]
 
-            # ── In-clinic section ────────────────────────────────
-            if clinic_appts:
-                # All of today's in-clinic appointments for wait math
-                all_today = _supa.table("appointments").select(
-                    "token_number, appointment_time, status"
-                ).eq("doctor_id", doctor_id).eq("appointment_date", today_ist).neq(
-                    "consultation_type", "online"
-                ).execute().data or []
+            def appt_name(a):
+                return (a.get("patients") or {}).get("name", "Patient")
 
-                cfg = get_slot_config()
-                eve_start = cfg["evening_start"]
-                eve_start_display = format_time(eve_start[:5])
-                slot_min = cfg["duration"]
+            def t_of(a):
+                return _time_str(a.get("appointment_time"))
 
-                def appt_name(a):
-                    return (a.get("patients") or {}).get("name", "Patient")
+            def slot_display(a):
+                t = t_of(a)[:5]
+                try:
+                    return format_time(t)
+                except Exception:
+                    return t
 
-                def disp(a):
-                    return get_display_token(a.get("token_number"), a.get("appointment_time"),
-                                             doctor_id=a.get("doctor_id"),
-                                             date_str=str(a.get("appointment_date", ""))[:10])
+            def disp(a):
+                return get_display_token(
+                    a.get("token_number"), a.get("appointment_time"),
+                    doctor_id=a.get("doctor_id"),
+                    date_str=today_ist
+                )
 
-                def t_of(a):
-                    return _time_str(a.get("appointment_time"))
+            # Group by doctor
+            from collections import defaultdict
+            by_doctor = defaultdict(list)
+            for a in all_my_appts:
+                by_doctor[a["doctor_id"]].append(a)
 
-                def slot_display(a):
-                    t = t_of(a)[:5]
-                    try:
-                        return format_time(t)
-                    except Exception:
-                        return t
+            for did, appts in by_doctor.items():
+                doc_info = (appts[0].get("doctors") or {})
+                doc_clinic = doc_info.get("clinic_name") or clinic_name
+                doc_name   = doc_info.get("name") or "Doctor"
 
-                serving = next((a for a in all_today if a.get("status") == "In Progress"), None)
-                if not serving and current_token > 0:
-                    serving = next(
-                        (a for a in all_today if a.get("token_number") == current_token), None
-                    )
-                serving_time = t_of(serving) if serving else ""
-                current_display = disp(serving) if serving else "Not started"
+                clinic_appts = [a for a in appts if a.get("consultation_type") != "online"]
+                online_appts = [a for a in appts if a.get("consultation_type") == "online"]
 
-                def session_status(a):
-                    if a.get("status") == "In Progress" or (
-                        current_token and a.get("token_number") == current_token
-                    ):
-                        return "🟢 Now being seen"
-                    if a.get("status") == "Completed" or (serving_time and t_of(a) < serving_time):
-                        return "✅ Done"
-                    is_evening = t_of(a) >= "13:00:00"
-                    ahead = len([
-                        x for x in all_today
-                        if x.get("status") == "Confirmed"
-                        and (t_of(x) >= "13:00:00") == is_evening
-                        and t_of(x) < t_of(a)
-                        and (not serving_time or t_of(x) > serving_time)
-                    ])
-                    wait = ahead * slot_min
-                    return f"⏳ ~{wait} mins wait" if wait > 0 else "⏳ Next in line"
-
-                morning = sorted([a for a in clinic_appts if t_of(a) < "13:00:00"], key=t_of)
-                evening = sorted([a for a in clinic_appts if t_of(a) >= "13:00:00"], key=t_of)
-
-                lines.append(f"🏥 {clinic_name} - Live Queue\n")
-                lines.append(f"Current Token: {current_display}\n")
-
-                for a in morning:
-                    lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
-
-                if evening:
-                    evening_open = now_ist.strftime("%H:%M") >= eve_start[:5]
-                    for a in evening:
-                        if evening_open:
-                            lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
-                        else:
-                            lines.append(
-                                f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → 🌙 Evening session. "
-                                f"Check back after {eve_start_display}"
-                            )
-
-            # ── Online consultation section ───────────────────────
-            if online_appts:
                 if lines:
-                    lines.append("")  # blank separator
+                    lines.append("")  # separator between doctors
 
-                for oa in online_appts:
-                    pat_name = (oa.get("patients") or {}).get("name", "Patient")
-                    appt_time_disp = format_time(_time_str(oa.get("appointment_time"))[:5])
+                # ── In-clinic section ────────────────────────────────
+                if clinic_appts:
+                    # Current token for this doctor
+                    tok_res = _supa.table("tokens").select("current_token").eq(
+                        "doctor_id", did
+                    ).eq("queue_date", today_ist).execute()
+                    current_token = tok_res.data[0]["current_token"] if tok_res.data else 0
 
-                    # Get the O-token counter and room_url from consultations table
-                    consult_res = _supa.table("consultations").select(
-                        "room_url"
-                    ).eq("appointment_id", oa["id"]).limit(1).execute()
+                    # Self-heal stale token
+                    if current_token:
+                        chk = _supa.table("appointments").select("id").eq(
+                            "doctor_id", did
+                        ).eq("appointment_date", today_ist).eq("token_number", current_token).execute()
+                        if not chk.data:
+                            current_token = 0
+                            _supa.table("tokens").update({"current_token": 0}).eq(
+                                "doctor_id", did).eq("queue_date", today_ist).execute()
 
-                    room_url = (consult_res.data[0]["room_url"] if consult_res.data else None)
-
-                    # Compute O-token display
-                    o_count_res = _supa.table("appointments").select("id").eq(
-                        "doctor_id", doctor_id
-                    ).eq("appointment_date", today_ist).eq(
+                    # All of today's in-clinic appointments for wait math
+                    all_today = _supa.table("appointments").select(
+                        "token_number, appointment_time, status"
+                    ).eq("doctor_id", did).eq("appointment_date", today_ist).neq(
                         "consultation_type", "online"
-                    ).neq("status", "Cancelled").execute()
-                    all_online = o_count_res.data or []
-                    appt_ids = [a["id"] for a in all_online]
-                    o_token = (appt_ids.index(oa["id"]) + 1) if oa["id"] in appt_ids else 1
-                    o_display = f"O{o_token}"
+                    ).execute().data or []
 
-                    lines.append(f"💻 Online Consultation — {pat_name}")
-                    lines.append(f"Token: {o_display} | Time: {appt_time_disp}")
-                    if room_url:
-                        lines.append(f"Join on time using your link:\n{room_url}")
-                    else:
-                        lines.append("Join link was sent when you booked.")
+                    serving = next((a for a in all_today if a.get("status") == "In Progress"), None)
+                    if not serving and current_token > 0:
+                        serving = next(
+                            (a for a in all_today if a.get("token_number") == current_token), None
+                        )
+                    serving_time = t_of(serving) if serving else ""
+                    current_display = disp(serving) if serving else "Not started"
+
+                    # Per-doctor evening start config
+                    eve_start = config_loader.get(
+                        "clinic.slot_start_evening", "17:00", did
+                    )
+                    eve_start_display = format_time(eve_start[:5])
+
+                    def session_status(a):
+                        if a.get("status") == "In Progress" or (
+                            current_token and a.get("token_number") == current_token
+                        ):
+                            return "🟢 Now being seen"
+                        if a.get("status") == "Completed" or (serving_time and t_of(a) < serving_time):
+                            return "✅ Done"
+                        is_evening = t_of(a) >= "13:00:00"
+                        ahead = len([
+                            x for x in all_today
+                            if x.get("status") == "Confirmed"
+                            and (t_of(x) >= "13:00:00") == is_evening
+                            and t_of(x) < t_of(a)
+                            and (not serving_time or t_of(x) > serving_time)
+                        ])
+                        wait = ahead * slot_min
+                        return f"⏳ ~{wait} mins wait" if wait > 0 else "⏳ Next in line"
+
+                    morning = sorted([a for a in clinic_appts if t_of(a) < "13:00:00"], key=t_of)
+                    evening = sorted([a for a in clinic_appts if t_of(a) >= "13:00:00"], key=t_of)
+
+                    lines.append(f"🏥 {doc_clinic} ({doc_name}) - Live Queue\n")
+                    lines.append(f"Current Token: {current_display}\n")
+
+                    for a in morning:
+                        lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
+
+                    if evening:
+                        evening_open = now_ist.strftime("%H:%M") >= eve_start[:5]
+                        for a in evening:
+                            if evening_open:
+                                lines.append(f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → {session_status(a)}")
+                            else:
+                                lines.append(
+                                    f"{disp(a)} {appt_name(a)} ({slot_display(a)}) → 🌙 Evening session. "
+                                    f"Check back after {eve_start_display}"
+                                )
+
+                # ── Online consultation section ───────────────────────
+                if online_appts:
+                    if clinic_appts:
+                        lines.append("")
+
+                    for oa in online_appts:
+                        pat_name = (oa.get("patients") or {}).get("name", "Patient")
+                        appt_time_disp = format_time(_time_str(oa.get("appointment_time"))[:5])
+
+                        consult_res = _supa.table("consultations").select(
+                            "room_url"
+                        ).eq("appointment_id", oa["id"]).limit(1).execute()
+                        room_url = (consult_res.data[0]["room_url"] if consult_res.data else None)
+
+                        o_count_res = _supa.table("appointments").select("id").eq(
+                            "doctor_id", did
+                        ).eq("appointment_date", today_ist).eq(
+                            "consultation_type", "online"
+                        ).neq("status", "Cancelled").execute()
+                        all_online = o_count_res.data or []
+                        appt_ids = [a["id"] for a in all_online]
+                        o_token = (appt_ids.index(oa["id"]) + 1) if oa["id"] in appt_ids else 1
+                        o_display = f"O{o_token}"
+
+                        lines.append(f"💻 Online Consultation — {pat_name} ({doc_name})")
+                        lines.append(f"Token: {o_display} | Time: {appt_time_disp}")
+                        if room_url:
+                            lines.append(f"Join on time using your link:\n{room_url}")
+                        else:
+                            lines.append("Join link was sent when you booked.")
 
             lines.append("\nReply MENU for main menu")
             reply = "\n".join(lines)
