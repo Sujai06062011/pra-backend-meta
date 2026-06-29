@@ -3543,6 +3543,246 @@ async def list_reviews(doctor_id: str):
     return result.data or []
 
 
+# ── ANALYTICS ─────────────────────────────────────────────
+@app.get("/analytics/summary")
+async def analytics_summary():
+    from database import supabase
+    from datetime import datetime, timedelta, date
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(IST).date()
+    month_start = today.replace(day=1).isoformat()
+    month_end   = today.isoformat()
+
+    # Last 6 calendar months (inclusive of current)
+    def month_label(d: date) -> str:
+        return d.strftime("%b")
+    def month_start_for(d: date) -> str:
+        return d.replace(day=1).isoformat()
+    def month_end_for(d: date) -> str:
+        # last day of month
+        if d.month == 12:
+            last = d.replace(year=d.year+1, month=1, day=1) - timedelta(days=1)
+        else:
+            last = d.replace(month=d.month+1, day=1) - timedelta(days=1)
+        return last.isoformat()
+
+    months = []
+    for i in range(5, -1, -1):
+        # Go back i months from current month
+        m = today.month - i
+        y = today.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        months.append(date(y, m, 1))
+
+    # Fetch all doctors
+    doctors_res = supabase.table("doctors").select("id, name").eq("is_available", True).execute()
+    doctors = doctors_res.data or []
+    doctor_map = {d["id"]: d["name"].split()[-1] for d in doctors}  # last name as short label
+
+    # ── 1. All appointments (clinic-wide, no doctor filter) ──
+    appts_res = supabase.table("appointments").select(
+        "id, appointment_date, appointment_time, patient_id, doctor_id, status"
+    ).execute()
+    all_appts = appts_res.data or []
+
+    # ── 2. Total patients this month ──
+    month_appts = [a for a in all_appts if month_start <= (a.get("appointment_date") or "") <= month_end]
+    total_patients_month = len(set(a["patient_id"] for a in month_appts if a.get("patient_id")))
+
+    # ── 3. Avg daily appts this month ──
+    from collections import defaultdict
+    daily_counts: dict = defaultdict(int)
+    for a in month_appts:
+        d = a.get("appointment_date")
+        if d:
+            daily_counts[d] += 1
+    avg_daily = round(sum(daily_counts.values()) / max(len(daily_counts), 1), 1)
+
+    # ── 4. Avg satisfaction (clinic-wide) ──
+    reviews_res = supabase.table("reviews").select("rating").not_.is_("rating", "null").execute()
+    ratings = [r["rating"] for r in (reviews_res.data or []) if r.get("rating") is not None]
+    avg_satisfaction = round(sum(ratings) / len(ratings), 1) if ratings else None
+
+    # ── 5. Follow-up rate this month ──
+    visits_res = supabase.table("visits").select("id").gte("created_at", f"{month_start}T00:00:00").lte("created_at", f"{month_end}T23:59:59").execute()
+    visit_ids = [v["id"] for v in (visits_res.data or [])]
+    followups_month = 0
+    if visit_ids:
+        fu_res = supabase.table("followups").select("visit_id").in_("visit_id", visit_ids).execute()
+        followup_visit_ids = set(f["visit_id"] for f in (fu_res.data or []) if f.get("visit_id"))
+        followups_month = len(followup_visit_ids)
+    followup_rate = round(followups_month / max(len(visit_ids), 1) * 100) if visit_ids else 0
+
+    # ── 6. Monthly trend (last 6 months) ──
+    # Track first-ever appointment per patient for "new patients"
+    patient_first: dict = {}
+    for a in sorted(all_appts, key=lambda x: x.get("appointment_date") or ""):
+        pid = a.get("patient_id")
+        d   = a.get("appointment_date")
+        if pid and d and pid not in patient_first:
+            patient_first[pid] = d
+
+    monthly_trend = []
+    for m in months:
+        ms = month_start_for(m)
+        me = month_end_for(m)
+        m_appts = [a for a in all_appts if ms <= (a.get("appointment_date") or "") <= me]
+        total = len(set(a["patient_id"] for a in m_appts if a.get("patient_id")))
+        new_patients = sum(1 for pid, fd in patient_first.items() if ms <= fd <= me)
+        by_doctor = defaultdict(set)
+        for a in m_appts:
+            did = a.get("doctor_id")
+            pid = a.get("patient_id")
+            if did and pid:
+                by_doctor[did].add(pid)
+        row: dict = {"month": month_label(m), "total": total, "new_patients": new_patients}
+        for did, name in doctor_map.items():
+            row[name] = len(by_doctor.get(did, set()))
+        monthly_trend.append(row)
+
+    # ── 7. Appointments by doctor per month ──
+    appts_by_doctor = []
+    for m in months:
+        ms = month_start_for(m)
+        me = month_end_for(m)
+        m_appts = [a for a in all_appts if ms <= (a.get("appointment_date") or "") <= me]
+        row2: dict = {"month": month_label(m)}
+        for did, name in doctor_map.items():
+            row2[name] = sum(1 for a in m_appts if a.get("doctor_id") == did)
+        appts_by_doctor.append(row2)
+
+    # ── 8. Age distribution (all patients) ──
+    patients_res = supabase.table("patients").select("age").execute()
+    age_buckets: dict = {"0–12": 0, "13–25": 0, "26–40": 0, "41–60": 0, "60+": 0}
+    for p in (patients_res.data or []):
+        age = p.get("age")
+        if age is None:
+            continue
+        try:
+            age = int(age)
+        except (ValueError, TypeError):
+            continue
+        if age <= 12:   age_buckets["0–12"] += 1
+        elif age <= 25: age_buckets["13–25"] += 1
+        elif age <= 40: age_buckets["26–40"] += 1
+        elif age <= 60: age_buckets["41–60"] += 1
+        else:           age_buckets["60+"] += 1
+    age_distribution = [{"group": k, "count": v} for k, v in age_buckets.items()]
+
+    # ── 9. Peak hours (all appointments) ──
+    hour_counts: dict = defaultdict(int)
+    for a in all_appts:
+        t = a.get("appointment_time")
+        if t:
+            try:
+                h = int(t.split(":")[0])
+                hour_counts[h] += 1
+            except (ValueError, IndexError):
+                pass
+    peak_hours = []
+    for h in range(6, 22):
+        label = f"{h % 12 or 12}{'am' if h < 12 else 'pm'}"
+        peak_hours.append({"hour": label, "count": hour_counts.get(h, 0)})
+    # Trim leading/trailing zeros
+    while peak_hours and peak_hours[0]["count"] == 0:
+        peak_hours.pop(0)
+    while peak_hours and peak_hours[-1]["count"] == 0:
+        peak_hours.pop()
+
+    # ── 10. Top conditions (diagnosis keyword bucketing) ──
+    visits_diag_res = supabase.table("visits").select("diagnosis").execute()
+    cond_counts: dict = defaultdict(int)
+    CONDITION_KEYWORDS = {
+        "Fever / Cold":  ["fever", "cold", "flu", "viral", "cough", "throat", "cold and"],
+        "Hypertension":  ["hypertension", "blood pressure", "bp", "htn"],
+        "Diabetes":      ["diabetes", "diabetic", "sugar", "dm ", "type 2", "type 1"],
+        "Respiratory":   ["asthma", "respiratory", "bronchitis", "wheez", "copd", "breathin"],
+        "Skin":          ["skin", "rash", "eczema", "dermatitis", "allerg", "itching"],
+        "Gastro":        ["gastro", "stomach", "abdomen", "diarrhea", "vomit", "nausea", "acidity", "gastritis"],
+    }
+    for v in (visits_diag_res.data or []):
+        diag = (v.get("diagnosis") or "").lower()
+        if not diag:
+            continue
+        matched = False
+        for cond, keywords in CONDITION_KEYWORDS.items():
+            if any(kw in diag for kw in keywords):
+                cond_counts[cond] += 1
+                matched = True
+                break
+        if not matched:
+            cond_counts["Other"] += 1
+    total_diag = sum(cond_counts.values()) or 1
+    top_conditions = sorted(
+        [{"name": k, "value": round(v / total_diag * 100)} for k, v in cond_counts.items() if v > 0],
+        key=lambda x: -x["value"]
+    )[:6]
+
+    # ── 11. Patient retention ──
+    # Group appointments by patient, sorted by date
+    patient_appt_dates: dict = defaultdict(list)
+    for a in all_appts:
+        pid = a.get("patient_id")
+        d   = a.get("appointment_date")
+        if pid and d:
+            patient_appt_dates[pid].append(d)
+    for pid in patient_appt_dates:
+        patient_appt_dates[pid].sort()
+
+    ret_30 = ret_90 = ret_ever = 0
+    total_patients_with_visits = len(patient_appt_dates)
+    for pid, dates in patient_appt_dates.items():
+        if len(dates) < 2:
+            continue
+        first = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        second = datetime.strptime(dates[1], "%Y-%m-%d").date()
+        gap = (second - first).days
+        ret_ever += 1
+        if gap <= 90: ret_90 += 1
+        if gap <= 30: ret_30 += 1
+
+    def pct(n): return round(n / max(total_patients_with_visits, 1) * 100)
+    retention = {"d30": pct(ret_30), "d90": pct(ret_90), "all_time": pct(ret_ever)}
+
+    # ── prev month for KPI change calculations ──
+    prev_month_start = month_start_for(months[-2]) if len(months) >= 2 else month_start
+    prev_month_end   = month_end_for(months[-2])   if len(months) >= 2 else month_start
+    prev_appts = [a for a in all_appts if prev_month_start <= (a.get("appointment_date") or "") <= prev_month_end]
+    prev_patients = len(set(a["patient_id"] for a in prev_appts if a.get("patient_id")))
+    prev_daily_counts = defaultdict(int)
+    for a in prev_appts:
+        d = a.get("appointment_date")
+        if d:
+            prev_daily_counts[d] += 1
+    prev_avg_daily = round(sum(prev_daily_counts.values()) / max(len(prev_daily_counts), 1), 1)
+
+    def change_pct(curr, prev):
+        if prev == 0:
+            return None
+        return round((curr - prev) / prev * 100, 1)
+
+    return {
+        "kpis": {
+            "total_patients_month": total_patients_month,
+            "total_patients_change": change_pct(total_patients_month, prev_patients),
+            "avg_daily_appts": avg_daily,
+            "avg_daily_change": change_pct(avg_daily, prev_avg_daily),
+            "avg_satisfaction": avg_satisfaction,
+            "followup_rate": followup_rate,
+        },
+        "monthly_trend": monthly_trend,
+        "appts_by_doctor": appts_by_doctor,
+        "age_distribution": age_distribution,
+        "peak_hours": peak_hours,
+        "top_conditions": top_conditions,
+        "retention": retention,
+        "doctor_names": list(doctor_map.values()),
+    }
+
+
 # ── DOCTOR ────────────────────────────────────────────────
 @app.get("/doctor/{doctor_id}")
 async def get_doctor(doctor_id: str):
