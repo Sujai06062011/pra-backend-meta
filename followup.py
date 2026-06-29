@@ -529,6 +529,23 @@ async def make_followup_call_from_followup(followup: dict):
         traceback.print_exc()
 
 
+async def mark_no_response_followups():
+    """Daily Job: Mark followups as 'No Response' if WhatsApp was sent 3+ days ago with no reply."""
+    print("🔕 Running: No-Response Follow-up Marker")
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=3)).isoformat()
+    result = supabase.table("followups").select("id").in_(
+        "call_status", ["Whatsapp-Sent", "Pending"]
+    ).lt("updated_at", cutoff).execute()
+    rows = result.data or []
+    if not rows:
+        print("No stale followups found")
+        return
+    ids = [r["id"] for r in rows]
+    supabase.table("followups").update({"call_status": "No Response"}).in_("id", ids).execute()
+    print(f"Marked {len(ids)} followup(s) as No Response")
+
+
 async def send_followup_whatsapp_job():
     """8AM Job: Send follow-up WhatsApp from followups table"""
     print("💬 Running: Follow-up WhatsApp Job")

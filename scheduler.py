@@ -368,7 +368,7 @@ async def send_review_requests():
 
 def _populate_scheduler(scheduler: AsyncIOScheduler):
     """Add per-doctor jobs to the scheduler. Called by init and reschedule."""
-    from followup import send_followup_whatsapp_job, make_followup_calls_job
+    from followup import send_followup_whatsapp_job, make_followup_calls_job, mark_no_response_followups
 
     # Fetch all active doctors
     try:
@@ -410,6 +410,17 @@ def _populate_scheduler(scheduler: AsyncIOScheduler):
         add("review_requests",   "review_requests",   "Review Requests",     send_review_requests)
         add("followup_whatsapp", "followup_whatsapp", "Followup WhatsApp",   send_followup_whatsapp_job)
         add("followup_calls",    "followup_calls",    "Followup Calls",      make_followup_calls_job)
+
+    # No-response marker runs once daily (not per-doctor) — add only once
+    scheduler.add_job(
+        mark_no_response_followups,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Kolkata"),
+        id="followup_no_response",
+        name="Followup No-Response Marker",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    print("   ✅ [Global] No-Response Marker: 09:00 IST")
 
 
 async def init_scheduler() -> AsyncIOScheduler:

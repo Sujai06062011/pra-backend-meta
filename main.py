@@ -975,49 +975,68 @@ async def meta_webhook_inbound(request: Request):
                         else:
                             visit_type = "in_clinic" if button_id == "visit_in_clinic" else "online"
                             await handle_visit_type_selected(from_number, visit_type, clinic_number)
+                    elif action == "fu_book_yes" and followup_id:
+                        supabase.table("followups").update({
+                            "call_status": "Booked"
+                        }).eq("id", followup_id).execute()
+                        original = supabase.table("followups").select(
+                            "*, patients(name, language)"
+                        ).eq("id", followup_id).single().execute().data
+                        patient_name = original["patients"]["name"]
+                        patient_id = original["patient_id"]
+                        followup_doctor_id = original.get("doctor_id", doctor_id)
+                        upsert_conversation_state(from_number, "awaiting_booking_date", {
+                            "patient_id": patient_id,
+                            "patient_name": patient_name,
+                            "doctor_id": followup_doctor_id
+                        })
+                        await send_meta_text(from_number,
+                            f"Let's book an appointment for {patient_name}. "
+                            f"What date works for you? (e.g. 15 Jun or tomorrow)")
+
+                    elif action == "fu_book_no" and followup_id:
+                        await send_meta_text(from_number,
+                            "Okay, hope you feel better soon! 🙏\n"
+                            "Do rest well and follow the prescription. Reply Hi anytime if you need help.")
+
                     elif followup_id:
                         if action == "ok":
                             supabase.table("followups").update({
-                                "call_status": "Completed", "response": "Better"
+                                "call_status": "Recovered", "response": "Better"
                             }).eq("id", followup_id).execute()
                             await send_meta_text(from_number,
-                                "Great to hear! Wishing continued good health. Take care! 🌟\n"
+                                "Wonderful! So glad to hear you're feeling better. 😊\n\n"
+                                "Stay healthy and take care!\n"
                                 "— TrueCare Family Clinic")
 
                         elif action == "recovering":
                             supabase.table("followups").update({
-                                "call_status": "Completed", "response": "Same"
+                                "call_status": "Recovering", "response": "Same"
                             }).eq("id", followup_id).execute()
-                            original = supabase.table("followups").select("*").eq(
-                                "id", followup_id).single().execute().data
-                            new_date = (datetime.now(IST) + timedelta(days=3)).date().isoformat()
-                            supabase.table("followups").insert({
-                                "patient_id": original["patient_id"],
-                                "visit_id": original["visit_id"],
-                                "doctor_id": original["doctor_id"],
-                                "scheduled_date": new_date,
-                                "call_status": "Pending",
-                                "followup_day": (original.get("followup_day") or 1) + 1,
-                                "channel": "call"
-                            }).execute()
-                            await send_meta_text(from_number,
-                                "Understood! We'll check in again in 3 days. "
-                                "Rest well and follow the prescription. 🙏\n"
-                                "— TrueCare Family Clinic")
+                            await send_meta_interactive(
+                                from_number,
+                                "Sorry to hear you're still recovering. 🙏\n\n"
+                                "Would you like to book an appointment with the doctor?",
+                                [
+                                    {"id": f"fu_book_yes__{followup_id}", "title": "Yes, book appointment"},
+                                    {"id": f"fu_book_no__{followup_id}",  "title": "No, I'll wait"},
+                                ]
+                            )
 
                         elif action == "appt":
                             supabase.table("followups").update({
-                                "call_status": "Completed", "response": "Worse"
+                                "call_status": "Needs Appointment", "response": "Worse"
                             }).eq("id", followup_id).execute()
                             original = supabase.table("followups").select(
                                 "*, patients(name, language)"
                             ).eq("id", followup_id).single().execute().data
                             patient_name = original["patients"]["name"]
                             patient_id = original["patient_id"]
+                            followup_doctor_id = original.get("doctor_id", doctor_id)
                             upsert_conversation_state(from_number, "awaiting_booking_date", {
                                 "patient_id": patient_id,
                                 "patient_name": patient_name,
-                                "doctor_id": "8c33abe0-5d2e-4613-9437-c7c375e8d162"
+                                "doctor_id": followup_doctor_id
                             })
                             await send_meta_text(from_number,
                                 f"We'll book an appointment for {patient_name}. "
@@ -3395,6 +3414,55 @@ async def pending_followups(doctor_id: str):
 async def list_followups(doctor_id: str):
     from database import supabase
     result = supabase.table("followups").select("*, patients(name, mobile, language)").eq("doctor_id", doctor_id).order("created_at", desc=True).execute()
+    return result.data or []
+
+
+@app.get("/followups/summary")
+async def followups_summary(doctor_id: str, days: int = 7):
+    from database import supabase
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    result = supabase.table("followups").select("call_status").eq("doctor_id", doctor_id).gte("created_at", cutoff).execute()
+    rows = result.data or []
+    counts: dict[str, int] = {
+        "pending": 0, "whatsapp_sent": 0, "recovered": 0,
+        "recovering": 0, "needs_appointment": 0, "booked": 0,
+        "no_response": 0, "completed": 0, "call_triggered": 0,
+    }
+    for r in rows:
+        cs = (r.get("call_status") or "Pending").lower().replace(" ", "_").replace("-", "_")
+        if cs in counts:
+            counts[cs] += 1
+        else:
+            counts["pending"] += 1
+    counts["total"] = len(rows)
+    counts["awaiting_reply"] = counts["pending"] + counts["whatsapp_sent"]
+    counts["resolved"] = counts["recovered"] + counts["completed"] + counts["booked"]
+    counts["needs_attention"] = counts["recovering"] + counts["needs_appointment"] + counts["no_response"]
+    return counts
+
+
+@app.get("/followups/list")
+async def list_followups_filtered(doctor_id: str, days: int = 7, status: str = "all"):
+    from database import supabase
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    q = supabase.table("followups").select("*, patients(name, mobile, language)").eq("doctor_id", doctor_id).gte("created_at", cutoff).order("created_at", desc=True)
+    if status != "all":
+        status_map = {
+            "pending": "Pending",
+            "whatsapp_sent": "Whatsapp-Sent",
+            "recovered": "Recovered",
+            "recovering": "Recovering",
+            "needs_appointment": "Needs Appointment",
+            "booked": "Booked",
+            "no_response": "No Response",
+            "completed": "Completed",
+        }
+        db_status = status_map.get(status.lower())
+        if db_status:
+            q = q.eq("call_status", db_status)
+    result = q.execute()
     return result.data or []
 
 
