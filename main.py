@@ -605,9 +605,11 @@ async def download_meta_media(media_id: str) -> bytes:
 
 
 async def transcribe_audio(audio_bytes: bytes, language_code: str = "ta") -> str:
+    """Transcribe audio bytes using Groq Whisper large-v3.
+    Result goes through the SAME routing logic as typed text — no special-casing."""
     groq_key = os.getenv("GROQ_API_KEY", "")
     if not groq_key:
-        print("[STT ERROR] GROQ_API_KEY not set")
+        print("[STT ERROR] GROQ_API_KEY not set — add to Railway env vars")
         return ""
 
     lang_map = {"ta": "ta", "hi": "hi", "en": "en", "te": "te", "kn": "kn", "ml": "ml"}
@@ -615,19 +617,18 @@ async def transcribe_audio(audio_bytes: bytes, language_code: str = "ta") -> str
     print(f"[STT] Audio: {len(audio_bytes)} bytes, lang: {whisper_lang}")
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {groq_key}"},
-                files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-                data={"model": "whisper-large-v3", "language": whisper_lang,
-                      "response_format": "text"},
-            )
-        print(f"[STT] Status: {resp.status_code}")
-        if resp.status_code != 200:
-            print(f"[STT ERROR] {resp.text[:200]}")
-            return ""
-        transcript = resp.text.strip()
+        import groq as _groq
+        import io
+        client = _groq.Groq(api_key=groq_key)
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "audio.ogg"
+        transcription = client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=audio_file,
+            language=whisper_lang,
+            response_format="text",
+        )
+        transcript = transcription.strip() if isinstance(transcription, str) else str(transcription).strip()
         print(f"[STT] Transcript: '{transcript}'")
         return transcript
     except Exception as e:

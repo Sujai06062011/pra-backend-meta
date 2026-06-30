@@ -11,3 +11,4 @@ python-multipart==0.0.9
 apscheduler==3.10.4
 PyJWT==2.8.0
 cryptography==42.0.0
+groq>=0.8.0
