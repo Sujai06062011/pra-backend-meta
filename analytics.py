@@ -476,64 +476,61 @@ def _current_session_now() -> str:
     return "evening" if hour >= 13 else "morning"
 
 
-def _build_name_search_terms(name: str) -> list[str]:
+def _name_matches(stored_name: str, query: str) -> bool:
     """
-    Build a list of search terms to try for a name.
-    Handles single-word inputs like "Sujaikumar" that may be stored
-    as two words ("Sujai Kumar") by also trying meaningful prefixes.
+    Check if a stored patient name matches a doctor's search query.
+    Handles mismatches like "Sujai Kumar" vs "Sujaikumar" (one word vs two).
+    All comparison is case-insensitive.
     """
-    name = name.strip()
-    terms = [name]  # always try the exact input first
+    stored = stored_name.lower().strip()
+    q = query.lower().strip()
 
-    words = name.split()
-    if len(words) == 1 and len(name) >= 5:
-        # Single word input: try first 5 chars as a prefix ("Sujai" from "Sujaikumar")
-        # and last 5 chars as a suffix ("kumar" from "Sujaikumar")
-        terms.append(name[:5])
-        if len(name) >= 10:
-            terms.append(name[-5:])
-    elif len(words) > 1:
-        # Multi-word: also try each individual word (≥4 chars)
-        for w in words:
-            if len(w) >= 4:
-                terms.append(w)
+    # Exact substring match: "sujai kumar" in "sujai kumar" or "sujaikumar" in "sujaikumar"
+    if q in stored:
+        return True
 
-    return list(dict.fromkeys(terms))  # deduplicate, preserve order
+    # Stored name contains all query words: "sujai" + "kumar" both in "sujai kumar"
+    q_words = q.split()
+    if all(w in stored for w in q_words):
+        return True
+
+    # Query without spaces matches stored without spaces: "sujaikumar" == "sujai kumar" → "sujaikumar"
+    if q.replace(" ", "") == stored.replace(" ", ""):
+        return True
+
+    # Query tokens appear in stored name tokens (partial first-name match)
+    stored_words = stored.split()
+    for q_word in q_words:
+        if len(q_word) >= 4 and any(q_word in sw for sw in stored_words):
+            return True
+
+    return False
 
 
 def _search_patient_by_name(doctor_id: str, name: str) -> list:
-    """Search patients by name, scoped to this doctor's appointment history."""
-    search_terms = _build_name_search_terms(name)
-
-    # Collect unique matches across all search terms
-    seen_ids: dict = {}
-    for term in search_terms:
-        try:
-            pat_res = supabase.table("patients").select("id, name, mobile, age, gender")\
-                .filter("name", "ilike", f"%{term}%").execute()
-            for p in (pat_res.data or []):
-                if p["id"] not in seen_ids:
-                    seen_ids[p["id"]] = p
-        except Exception as e:
-            print(f"[ANALYTICS] name search term '{term}' failed: {e}")
-
-    if not seen_ids:
+    """
+    Search patients by name scoped to this doctor's appointment history.
+    Fetches all patients this doctor has seen, then filters by name in Python.
+    This avoids ilike/filter encoding issues and handles name format mismatches.
+    """
+    try:
+        # Fetch all unique patients this doctor has appointments with (incl. cancelled)
+        res = supabase.table("appointments")\
+            .select("patient_id, patients(id, name, mobile, age, gender)")\
+            .eq("doctor_id", doctor_id)\
+            .execute()
+    except Exception as e:
+        print(f"[ANALYTICS] _search_patient_by_name appointments fetch failed: {e}")
         return []
 
-    # Confirm each candidate has an appointment with this doctor
-    confirmed = []
-    for p in seen_ids.values():
-        try:
-            chk = supabase.table("appointments").select("id")\
-                .eq("doctor_id", doctor_id)\
-                .eq("patient_id", p["id"])\
-                .limit(1).execute()
-            if chk.data:
-                confirmed.append(p)
-        except Exception:
-            pass
+    seen: dict = {}
+    for r in (res.data or []):
+        pat = r.get("patients") or {}
+        pid = pat.get("id")
+        if pid and pid not in seen:
+            seen[pid] = pat
 
-    return confirmed
+    return [p for p in seen.values() if _name_matches(p.get("name", ""), name)]
 
 
 def _get_last_visit(doctor_id: str, patient_id: str) -> dict | None:
