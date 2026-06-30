@@ -476,24 +476,53 @@ def _current_session_now() -> str:
     return "evening" if hour >= 13 else "morning"
 
 
+def _build_name_search_terms(name: str) -> list[str]:
+    """
+    Build a list of search terms to try for a name.
+    Handles single-word inputs like "Sujaikumar" that may be stored
+    as two words ("Sujai Kumar") by also trying meaningful prefixes.
+    """
+    name = name.strip()
+    terms = [name]  # always try the exact input first
+
+    words = name.split()
+    if len(words) == 1 and len(name) >= 5:
+        # Single word input: try first 5 chars as a prefix ("Sujai" from "Sujaikumar")
+        # and last 5 chars as a suffix ("kumar" from "Sujaikumar")
+        terms.append(name[:5])
+        if len(name) >= 10:
+            terms.append(name[-5:])
+    elif len(words) > 1:
+        # Multi-word: also try each individual word (≥4 chars)
+        for w in words:
+            if len(w) >= 4:
+                terms.append(w)
+
+    return list(dict.fromkeys(terms))  # deduplicate, preserve order
+
+
 def _search_patient_by_name(doctor_id: str, name: str) -> list:
     """Search patients by name, scoped to this doctor's appointment history."""
-    # Step 1: find patients whose name matches (case-insensitive)
-    try:
-        pat_res = supabase.table("patients").select("id, name, mobile, age, gender")\
-            .filter("name", "ilike", f"%{name}%").execute()
-        all_matches = pat_res.data or []
-    except Exception as e:
-        print(f"[ANALYTICS] _search_patient_by_name patient lookup failed: {e}")
+    search_terms = _build_name_search_terms(name)
+
+    # Collect unique matches across all search terms
+    seen_ids: dict = {}
+    for term in search_terms:
+        try:
+            pat_res = supabase.table("patients").select("id, name, mobile, age, gender")\
+                .filter("name", "ilike", f"%{term}%").execute()
+            for p in (pat_res.data or []):
+                if p["id"] not in seen_ids:
+                    seen_ids[p["id"]] = p
+        except Exception as e:
+            print(f"[ANALYTICS] name search term '{term}' failed: {e}")
+
+    if not seen_ids:
         return []
 
-    if not all_matches:
-        return []
-
-    # Step 2: for each candidate, confirm they have an appointment with this doctor
-    # Do this per-patient to avoid large .in_() lists
+    # Confirm each candidate has an appointment with this doctor
     confirmed = []
-    for p in all_matches:
+    for p in seen_ids.values():
         try:
             chk = supabase.table("appointments").select("id")\
                 .eq("doctor_id", doctor_id)\
