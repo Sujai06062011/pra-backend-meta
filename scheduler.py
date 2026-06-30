@@ -225,13 +225,78 @@ async def get_all_active_doctors() -> list:
     """Return all doctors where is_available = true. Used by multi-doctor scheduler loops."""
     try:
         result = supabase.table("doctors") \
-            .select("id, name, whatsapp_number, clinic_name") \
+            .select("id, name, whatsapp_number, mobile, clinic_name") \
             .eq("is_available", True) \
             .execute()
         return result.data or []
     except Exception as e:
         print(f"⚠️ get_all_active_doctors failed: {e}")
         return []
+
+
+def _is_current_time_match(time_str: str) -> bool:
+    """Return True if the current IST time matches HH:MM (within the current minute)."""
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(IST).strftime("%H:%M")
+    return now == time_str.strip()
+
+
+def _format_daily_summary(doctor: dict, summary: dict, yesterday: dict) -> str:
+    name = doctor.get("name", "Doctor")
+    return (
+        f"Good morning {name}! 🌅\n\n"
+        f"Today's Schedule:\n"
+        f"📋 {summary.get('morning_count', 0)} appointments (Morning) | "
+        f"{summary.get('evening_count', 0)} appointments (Evening)\n"
+        f"👥 {summary.get('new_patients', 0)} new, {summary.get('returning_patients', 0)} returning\n\n"
+        f"Yesterday's Summary:\n"
+        f"✅ {yesterday.get('patients_seen', 0)} patients seen\n"
+        f"⏱️ Avg wait: {yesterday.get('avg_wait_minutes', 0)} mins\n"
+        f"💬 {yesterday.get('followup_replies_pending', 0)} follow-up replies need review\n"
+        f"🔔 {yesterday.get('queries_pending', 0)} pending queries\n\n"
+        f"Have a great day! 🙏"
+    )
+
+
+async def send_daily_doctor_summary():
+    """
+    Runs on a 15-minute check loop and sends the morning summary to each doctor
+    at their configured time (scheduler.daily_summary.time, default 08:00 IST).
+    Each doctor is wrapped in try/except so one failure never blocks others.
+    """
+    print("📊 Running: Daily Doctor Summary check")
+    from database import get_appointments_summary, get_weekly_doctor_stats
+
+    doctors = await get_all_active_doctors()
+    for doctor in doctors:
+        try:
+            configured_time = config_loader.get(
+                "scheduler.daily_summary.time", "08:00", doctor["id"]
+            )
+            if not _is_current_time_match(configured_time):
+                continue
+
+            if not config_loader.is_enabled("daily_summary", doctor["id"]):
+                continue
+
+            today = date.today().isoformat()
+            summary = get_appointments_summary(doctor["id"], today)
+            yesterday = get_weekly_doctor_stats(doctor["id"], days=1)
+
+            message = _format_daily_summary(doctor, summary, yesterday)
+
+            # Send to doctor's mobile (WhatsApp)
+            mobile = doctor.get("mobile") or doctor.get("whatsapp_number", "")
+            if not mobile:
+                print(f"⚠️ [{doctor['name']}] No mobile for daily summary")
+                continue
+
+            await send_whatsapp(mobile, message)
+            print(f"✅ Daily summary sent to {doctor['name']} ({mobile})")
+
+        except Exception as e:
+            print(f"❌ Daily summary failed for {doctor.get('name', '?')}: {e}")
 
 
 async def send_visit_summary():
@@ -410,6 +475,18 @@ def _populate_scheduler(scheduler: AsyncIOScheduler):
         add("review_requests",   "review_requests",   "Review Requests",     send_review_requests)
         add("followup_whatsapp", "followup_whatsapp", "Followup WhatsApp",   send_followup_whatsapp_job)
         add("followup_calls",    "followup_calls",    "Followup Calls",      make_followup_calls_job)
+
+    # Daily doctor summary — single job runs every 15 mins and checks each doctor's configured time
+    scheduler.add_job(
+        send_daily_doctor_summary,
+        "interval",
+        minutes=15,
+        id="daily_doctor_summary",
+        name="Daily Doctor Summary",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    print("   ✅ [Global] Daily Doctor Summary: checks every 15 min")
 
     # No-response marker runs once daily (not per-doctor) — add only once
     scheduler.add_job(

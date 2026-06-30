@@ -557,6 +557,203 @@ def get_patient_by_mobile(mobile: str):
     
     return result2.data[0] if result2.data else None
 
+def get_doctor_by_mobile(mobile: str):
+    """Check if this mobile belongs to an active doctor. Uses same normalization as get_doctor_by_whatsapp."""
+    clean = mobile.replace("+", "")
+    result = supabase.table("doctors")\
+        .select("id, name, speciality, clinic_name, mobile, whatsapp_number, is_available")\
+        .eq("mobile", clean)\
+        .eq("is_available", True)\
+        .execute()
+    if result.data:
+        return result.data[0]
+    # Try with + prefix in case stored that way
+    result = supabase.table("doctors")\
+        .select("id, name, speciality, clinic_name, mobile, whatsapp_number, is_available")\
+        .eq("mobile", mobile)\
+        .eq("is_available", True)\
+        .execute()
+    return result.data[0] if result.data else None
+
+
+def get_appointments_for_date(doctor_id: str, date_str: str, session: str = "both") -> list:
+    """Get all confirmed appointments for a doctor on a date, optionally filtered by session."""
+    result = supabase.table("appointments").select(
+        "id, appointment_date, appointment_time, patient_id, "
+        "patients(name, mobile)"
+    ).eq("doctor_id", doctor_id).eq("appointment_date", date_str).eq(
+        "status", "Confirmed"
+    ).neq("consultation_type", "online").order("appointment_time").execute()
+
+    appts = []
+    for a in (result.data or []):
+        t = str(a.get("appointment_time", ""))[:5]
+        is_eve = t >= "13:00"
+        if session == "morning" and is_eve:
+            continue
+        if session == "evening" and not is_eve:
+            continue
+        pat = a.get("patients") or {}
+        appts.append({
+            "id": a["id"],
+            "date": date_str,
+            "time": t,
+            "patient_id": a.get("patient_id", ""),
+            "patient_name": pat.get("name", "Patient"),
+            "patient_mobile": pat.get("mobile", ""),
+        })
+    return appts
+
+
+def get_appointments_summary(doctor_id: str, date_str: str) -> dict:
+    """Appointment counts for a doctor on a date: by session, new vs returning."""
+    result = supabase.table("appointments").select(
+        "appointment_time, status, patient_id, patients(mobile)"
+    ).eq("doctor_id", doctor_id).eq("appointment_date", date_str).neq(
+        "consultation_type", "online"
+    ).execute()
+
+    morning_count = 0
+    evening_count = 0
+    confirmed = 0
+    waiting = 0
+
+    patient_ids = []
+    for a in (result.data or []):
+        s = a.get("status", "")
+        if s == "Cancelled":
+            continue
+        t = str(a.get("appointment_time", ""))[:5]
+        if t >= "13:00":
+            evening_count += 1
+        else:
+            morning_count += 1
+        if s == "Confirmed":
+            confirmed += 1
+        else:
+            waiting += 1
+        patient_ids.append(a.get("patient_id", ""))
+
+    # New vs returning: new patients = registered after 30 days ago
+    new_patients = 0
+    returning_patients = 0
+    if patient_ids:
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now().date() - timedelta(days=30)).isoformat()
+        new_res = supabase.table("patients").select("id").in_(
+            "id", patient_ids
+        ).gte("created_at", cutoff).execute()
+        new_patients = len(new_res.data or [])
+        returning_patients = len(patient_ids) - new_patients
+
+    return {
+        "date": date_str,
+        "morning_count": morning_count,
+        "evening_count": evening_count,
+        "total": morning_count + evening_count,
+        "confirmed": confirmed,
+        "waiting": waiting,
+        "new_patients": new_patients,
+        "returning_patients": returning_patients,
+    }
+
+
+def get_weekly_doctor_stats(doctor_id: str, days: int = 7) -> dict:
+    """Stats for past N days: patients seen, avg wait, pending followups, pending queries."""
+    from datetime import datetime, timedelta, date as _date
+    today = _date.today()
+    start = (today - timedelta(days=days)).isoformat()
+    end = today.isoformat()
+
+    # Patients seen = completed appointments in range
+    appts = supabase.table("appointments").select("patient_id").eq(
+        "doctor_id", doctor_id
+    ).in_("status", ["Completed", "In Progress"]).gte(
+        "appointment_date", start
+    ).lte("appointment_date", end).execute()
+    patients_seen = len(set(a["patient_id"] for a in (appts.data or [])))
+
+    # Average wait: approximate from slot config duration
+    from database import get_slot_config
+    slot_cfg = get_slot_config()
+    avg_wait_minutes = slot_cfg.get("duration", 15)
+
+    # Followup replies needing attention
+    try:
+        cutoff = (today - timedelta(days=7)).isoformat()
+        fu_res = supabase.table("followups").select("id").eq(
+            "doctor_id", doctor_id
+        ).in_("reply", ["2", "3"]).gte("reply_date", cutoff).execute()
+        followup_replies_pending = len(fu_res.data or [])
+    except Exception:
+        followup_replies_pending = 0
+
+    # Pending queries
+    try:
+        q_res = supabase.table("patient_queries").select("id").eq(
+            "doctor_id", doctor_id
+        ).eq("status", "pending").execute()
+        queries_pending = len(q_res.data or [])
+    except Exception:
+        queries_pending = 0
+
+    return {
+        "days": days,
+        "patients_seen": patients_seen,
+        "avg_wait_minutes": avg_wait_minutes,
+        "followup_replies_pending": followup_replies_pending,
+        "queries_pending": queries_pending,
+    }
+
+
+def get_followups_needing_attention(doctor_id: str) -> list:
+    """Patients who replied 'still sick' or 'need to see doctor again' in last 7 days."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    try:
+        result = supabase.table("followups").select(
+            "id, patient_id, reply_date, reply, patients(name, mobile)"
+        ).eq("doctor_id", doctor_id).in_("reply", ["2", "3"]).gte(
+            "reply_date", cutoff
+        ).order("reply_date", desc=True).limit(20).execute()
+        out = []
+        for f in (result.data or []):
+            pat = f.get("patients") or {}
+            out.append({
+                "id": f["id"],
+                "patient_name": pat.get("name", "Patient"),
+                "patient_mobile": pat.get("mobile", ""),
+                "reply_date": f.get("reply_date", ""),
+                "reply_code": f.get("reply", ""),
+            })
+        return out
+    except Exception:
+        return []
+
+
+def get_unanswered_queries(doctor_id: str) -> list:
+    """Unanswered patient queries for this doctor."""
+    try:
+        result = supabase.table("patient_queries").select(
+            "id, question, created_at, patients(name, mobile)"
+        ).eq("doctor_id", doctor_id).eq("status", "pending").order(
+            "created_at", desc=True
+        ).limit(20).execute()
+        out = []
+        for q in (result.data or []):
+            pat = q.get("patients") or {}
+            out.append({
+                "id": q["id"],
+                "question": q.get("question", ""),
+                "created_at": q.get("created_at", ""),
+                "patient_name": pat.get("name", "Patient"),
+                "patient_mobile": pat.get("mobile", ""),
+            })
+        return out
+    except Exception:
+        return []
+
+
 def get_family_members(mobile: str):
     """Get all patients under this mobile number"""
     result = supabase.table("patients").select(

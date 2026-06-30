@@ -10,7 +10,7 @@ from consultation_helpers import (
     send_whatsapp_text,
 )
 from database import (
-    get_doctor_by_whatsapp, get_patient_by_mobile, get_conversation_state,
+    get_doctor_by_whatsapp, get_doctor_by_mobile, get_patient_by_mobile, get_conversation_state,
     save_conversation_state, get_queue_status, get_patient_token_today, get_family_tokens_today,
     check_holiday, get_booked_slots, get_next_token, create_appointment, create_online_appointment,
     get_upcoming_appointments, get_family_upcoming_appointments, cancel_appointment, create_patient,
@@ -609,9 +609,68 @@ async def send_patient_select_interactive(from_number: str, all_patients: list):
     return None  # message already sent interactively
 
 
+async def handle_doctor_message(from_number: str, text: str, doctor_record: dict) -> None:
+    """Handle a message from a doctor's mobile number.
+    Completely isolated from patient state machine and patient agent.
+    Doctor conversation state is keyed as 'doctor_{id}' to avoid any collision
+    with patient state even if the same physical number exists in patients table.
+    """
+    from doctor_agent import run_doctor_agent
+    from doctor_tool_executor import execute_doctor_tool
+    from consultation_helpers import send_whatsapp_text
+
+    doctor_id = doctor_record["id"]
+    state_key = f"doctor_{doctor_id}"
+
+    # Load doctor conversation history (distinct namespace from patient state)
+    _, temp_data = get_conversation_state(state_key)
+    history = (temp_data or {}).get("agent_history", [])
+
+    # Trim history to last 10 turns
+    if len(history) > 20:
+        history = history[-20:]
+
+    async def _tool_executor(tool_name, tool_input):
+        return await execute_doctor_tool(tool_name, tool_input)
+
+    try:
+        result = await run_doctor_agent(
+            doctor_id=doctor_id,
+            message=text,
+            doctor_context=doctor_record,
+            conversation_history=history,
+            tool_executor=_tool_executor,
+        )
+        reply = result.get("reply_text", "")
+        updated_history = result.get("updated_history", history)
+
+        save_conversation_state(state_key, "doctor_agent", {
+            "agent_history": updated_history[-20:],
+        })
+
+        if reply:
+            await send_whatsapp_text(from_number, reply)
+
+    except Exception as e:
+        print(f"[DOCTOR_AGENT ERROR] {e}")
+        await send_whatsapp_text(
+            from_number,
+            "Sorry, I ran into an error. Please try again in a moment."
+        )
+
+
 async def handle_message(from_number: str, text: str, to_number: str, media_url: str = ""):
     text = text.strip()
     t = text.lower().strip()
+
+    # ── DOCTOR CHECK (highest priority — before any patient routing) ──────────
+    # Exact mobile match only. Uses same normalization as get_doctor_by_whatsapp.
+    # A doctor who also has a patient record is routed here — never to patient flow.
+    _doctor_sender = get_doctor_by_mobile(from_number)
+    if _doctor_sender:
+        await handle_doctor_message(from_number, text, _doctor_sender)
+        return None
+    # ── END DOCTOR CHECK ──────────────────────────────────────────────────────
 
     # Get doctor by WhatsApp number
     doctor = get_doctor_by_whatsapp(to_number)
