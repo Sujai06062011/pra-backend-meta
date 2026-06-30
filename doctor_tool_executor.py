@@ -11,23 +11,49 @@ from database import (
     get_queue_status,
     cancel_appointment,
     get_appointments_for_date,
-    get_appointments_summary,
-    get_weekly_doctor_stats,
     get_followups_needing_attention,
     get_unanswered_queries,
+)
+from analytics import (
+    get_stats as _get_stats,
+    get_patient_list as _get_patient_list,
+    get_patient_detail as _get_patient_detail,
+    get_pending_items as _get_pending_items,
 )
 
 
 async def execute_doctor_tool(tool_name: str, tool_input: dict) -> dict:
     """Dispatch a doctor agent tool call to its implementation."""
 
-    if tool_name == "get_appointments_summary":
-        date_str = tool_input.get("date") or date.today().isoformat()
-        return get_appointments_summary(tool_input["doctor_id"], date_str)
+    if tool_name == "get_stats":
+        return _get_stats(
+            doctor_id=tool_input["doctor_id"],
+            metric=tool_input["metric"],
+            period=tool_input["period"],
+            n_days=tool_input.get("n_days"),
+            start_date=tool_input.get("start_date"),
+            end_date=tool_input.get("end_date"),
+            compare_to_previous=tool_input.get("compare_to_previous", False),
+        )
 
-    elif tool_name == "get_weekly_stats":
-        days = tool_input.get("days", 7)
-        return get_weekly_doctor_stats(tool_input["doctor_id"], days)
+    elif tool_name == "get_patient_list":
+        return _get_patient_list(
+            doctor_id=tool_input["doctor_id"],
+            filter_type=tool_input["filter_type"],
+            period=tool_input["period"],
+            n_days=tool_input.get("n_days"),
+            min_visit_count=tool_input.get("min_visit_count", 3),
+        )
+
+    elif tool_name == "get_patient_detail":
+        return _get_patient_detail(
+            doctor_id=tool_input["doctor_id"],
+            patient_ref=tool_input["patient_ref"],
+            session=tool_input.get("session"),
+        )
+
+    elif tool_name == "get_pending_items":
+        return _get_pending_items(tool_input["doctor_id"])
 
     elif tool_name == "get_current_queue_status":
         q = get_queue_status(tool_input["doctor_id"])

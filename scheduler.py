@@ -242,19 +242,19 @@ def _is_current_time_match(time_str: str) -> bool:
     return now == time_str.strip()
 
 
-def _format_daily_summary(doctor: dict, summary: dict, yesterday: dict) -> str:
+def _format_daily_summary(doctor: dict, today_appts: int, yesterday_seen: int,
+                           pending: dict) -> str:
     name = doctor.get("name", "Doctor")
     return (
         f"Good morning {name}! 🌅\n\n"
         f"Today's Schedule:\n"
-        f"📋 {summary.get('morning_count', 0)} appointments (Morning) | "
-        f"{summary.get('evening_count', 0)} appointments (Evening)\n"
-        f"👥 {summary.get('new_patients', 0)} new, {summary.get('returning_patients', 0)} returning\n\n"
-        f"Yesterday's Summary:\n"
-        f"✅ {yesterday.get('patients_seen', 0)} patients seen\n"
-        f"⏱️ Avg wait: {yesterday.get('avg_wait_minutes', 0)} mins\n"
-        f"💬 {yesterday.get('followup_replies_pending', 0)} follow-up replies need review\n"
-        f"🔔 {yesterday.get('queries_pending', 0)} pending queries\n\n"
+        f"📋 {today_appts} appointments booked\n\n"
+        f"Yesterday:\n"
+        f"✅ {yesterday_seen} patients seen\n\n"
+        f"Pending:\n"
+        f"💬 {pending.get('followup_concerns', 0)} follow-up concerns\n"
+        f"🔔 {pending.get('pending_queries', 0)} unanswered queries\n"
+        f"🔬 {pending.get('pending_lab_reports', 0)} lab reports\n\n"
         f"Have a great day! 🙏"
     )
 
@@ -266,7 +266,7 @@ async def send_daily_doctor_summary():
     Each doctor is wrapped in try/except so one failure never blocks others.
     """
     print("📊 Running: Daily Doctor Summary check")
-    from database import get_appointments_summary, get_weekly_doctor_stats
+    from analytics import get_stats as _get_stats, get_pending_items as _get_pending_items
 
     doctors = await get_all_active_doctors()
     for doctor in doctors:
@@ -280,13 +280,13 @@ async def send_daily_doctor_summary():
             if not config_loader.is_enabled("daily_summary", doctor["id"]):
                 continue
 
-            today = date.today().isoformat()
-            summary = get_appointments_summary(doctor["id"], today)
-            yesterday = get_weekly_doctor_stats(doctor["id"], days=1)
+            doctor_id = doctor["id"]
+            today_appts = _get_stats(doctor_id, "appointment_count", "today").get("value", 0)
+            yesterday_seen = _get_stats(doctor_id, "completed_visit_count", "yesterday").get("value", 0)
+            pending = _get_pending_items(doctor_id)
 
-            message = _format_daily_summary(doctor, summary, yesterday)
+            message = _format_daily_summary(doctor, today_appts, yesterday_seen, pending)
 
-            # Send to doctor's mobile (WhatsApp)
             mobile = doctor.get("mobile") or doctor.get("whatsapp_number", "")
             if not mobile:
                 print(f"⚠️ [{doctor['name']}] No mobile for daily summary")

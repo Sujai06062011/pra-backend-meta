@@ -27,32 +27,87 @@ def _get_client():
 
 DOCTOR_AGENT_TOOLS = [
     {
-        "name": "get_appointments_summary",
+        "name": "get_stats",
         "description": (
-            "Get appointment counts and stats for a doctor for today or a specific date. "
-            "Returns counts by session (morning/evening), confirmed vs waiting, new vs returning patients."
+            "Get a single numeric metric for this doctor over a time period. "
+            "Replaces the old get_appointments_summary and get_weekly_stats tools. "
+            "Available metrics: appointment_count, patient_count, new_patient_count, "
+            "returning_patient_count, cancelled_appointment_count, no_show_count, no_show_rate, "
+            "completed_visit_count, revenue, avg_revenue_per_patient, avg_wait_time_minutes, "
+            "followup_response_rate, online_consultation_count, in_clinic_consultation_count. "
+            "Available periods: today, yesterday, this_week, last_week, this_month, last_month, "
+            "this_quarter, last_quarter, this_year, last_n_days, custom, all_time. "
+            "Set compare_to_previous=true to also return the preceding period value and % change."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "doctor_id": {"type": "string"},
-                "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today if omitted"},
+                "metric": {"type": "string"},
+                "period": {"type": "string"},
+                "n_days": {"type": "integer", "description": "Only for period=last_n_days"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD, only for period=custom"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD, only for period=custom"},
+                "compare_to_previous": {"type": "boolean"},
             },
-            "required": ["doctor_id"],
+            "required": ["doctor_id", "metric", "period"],
         },
     },
     {
-        "name": "get_weekly_stats",
+        "name": "get_patient_list",
         "description": (
-            "Get summary stats for the past N days: patients seen, average wait time, "
-            "follow-up replies needing attention, pending queries."
+            "Get a filtered list of patients for this doctor. "
+            "filter_types: frequent_visitors, no_shows, new_patients, needs_followup_attention, "
+            "pending_lab_reports, pending_queries, online_consultation_patients, no_reply_to_followup. "
+            "Returns patient names, mobiles, and filter-specific metadata. Max 30 results. "
+            "GOLDEN RULE: READ-ONLY. No confirmation required."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "doctor_id": {"type": "string"},
-                "days": {"type": "integer", "description": "Days to look back, default 7"},
+                "filter_type": {"type": "string"},
+                "period": {"type": "string", "description": "Same period enum as get_stats"},
+                "n_days": {"type": "integer"},
+                "min_visit_count": {"type": "integer",
+                                    "description": "Only for frequent_visitors, default 3"},
             },
+            "required": ["doctor_id", "filter_type", "period"],
+        },
+    },
+    {
+        "name": "get_patient_detail",
+        "description": (
+            "Get a deep-dive on a single patient scoped to this doctor's history. "
+            "Pass patient_ref='next_in_queue' to get the next waiting patient's context card. "
+            "Or pass patient_ref='<name search>' (e.g. 'Priya') to find by name. "
+            "Returns: last diagnosis, last prescription summary, followup status, "
+            "visit count this year, pending query (if any), is_regular flag. "
+            "If name is ambiguous, returns status='ambiguous' with match list. "
+            "GOLDEN RULE: READ-ONLY. No confirmation required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doctor_id": {"type": "string"},
+                "patient_ref": {"type": "string",
+                                "description": "'next_in_queue' or a name to search"},
+                "session": {"type": "string", "enum": ["morning", "evening"],
+                            "description": "Relevant only for next_in_queue; auto-detected if omitted"},
+            },
+            "required": ["doctor_id", "patient_ref"],
+        },
+    },
+    {
+        "name": "get_pending_items",
+        "description": (
+            "Get a summary count of all items needing the doctor's attention: "
+            "pending lab reports, unanswered patient queries, followup concerns (last 7 days). "
+            "GOLDEN RULE: READ-ONLY. No confirmation required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"doctor_id": {"type": "string"}},
             "required": ["doctor_id"],
         },
     },
@@ -211,7 +266,24 @@ CRITICAL SAFETY RULES — NON-NEGOTIABLE:
 
 6. Never make up data. If a tool returns empty or errors, say so honestly.
 
-7. All times are IST. Resolve "today", "tomorrow", "this evening" relative to {today_date}."""
+7. All times are IST. Resolve "today", "tomorrow", "this evening" relative to {today_date}.
+
+ANALYTICS RULES (tools: get_stats, get_patient_list, get_patient_detail, get_pending_items):
+
+8. These are READ-ONLY tools. Never require confirmation for any of them.
+
+9. For get_stats: call once per metric. If the doctor asks for multiple metrics (e.g. "how many patients and how many no-shows this week"), make parallel tool calls — one per metric.
+
+10. For revenue metric: the result will include a "note" field flagging incomplete data (only online consultation fees tracked). Always relay this note to the doctor; do not present revenue as total clinic revenue.
+
+11. For get_patient_detail with patient_ref="next_in_queue": if status="queue_empty", tell the doctor simply "No patients waiting right now." Do not fabricate patient data.
+
+12. For get_patient_detail with a name search: if status="ambiguous", list the matches and ask the doctor to clarify. If status="not_found", say so honestly.
+
+13. When presenting patient lists from get_patient_list, keep it scannable:
+    - Show name + key detail (visit count, missed date, question excerpt, etc.)
+    - Group by category if multiple filter types were queried
+    - Cap display at 10 patients; say "and X more" if there are more"""
 
 
 def _validate_history(history: list) -> list:
