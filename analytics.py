@@ -156,8 +156,8 @@ def calculate_metric(doctor_id: str, metric: str, start: str, end: str) -> dict:
     if metric == "completed_visit_count":
         res = supabase.table("visits").select("id", count="exact")\
             .eq("doctor_id", doctor_id)\
-            .gte("created_at", f"{start}T00:00:00+05:30")\
-            .lte("created_at", f"{end}T23:59:59+05:30")\
+            .gte("created_at", start)\
+            .lte("created_at", f"{end}T23:59:59")\
             .execute()
         return {"value": res.count or 0}
 
@@ -461,7 +461,7 @@ def _get_visit_count_this_year(doctor_id: str, patient_id: str) -> int:
     year_start = date.today().replace(month=1, day=1).isoformat()
     res = supabase.table("visits").select("id", count="exact")\
         .eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
-        .gte("created_at", f"{year_start}T00:00:00+05:30").execute()
+        .gte("created_at", year_start).execute()
     return res.count or 0
 
 
