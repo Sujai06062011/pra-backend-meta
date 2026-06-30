@@ -51,7 +51,12 @@ TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "clinic_name": {
+                    "type": "string",
+                    "description": "Clinic name to scope results to this clinic's doctors only.",
+                }
+            },
             "required": [],
         },
     },
@@ -196,14 +201,16 @@ def _tool_get_patient(mobile: str) -> dict:
     return {"found": bool(patients), "patients": patients}
 
 
-def _tool_get_clinic_doctors() -> dict:
+def _tool_get_clinic_doctors(clinic_name: str = "") -> dict:
     from database import supabase as supa
-    result = (
+    query = (
         supa.table("doctors")
         .select("id, name, speciality, specialty_display, clinic_name")
         .eq("is_available", True)
-        .execute()
     )
+    if clinic_name:
+        query = query.eq("clinic_name", clinic_name)
+    result = query.execute()
     doctors = [
         {
             "id": d["id"],
@@ -514,14 +521,14 @@ def _tool_add_family_member(primary_mobile: str, name: str, dob: str,
 
 # ── Tool dispatcher ────────────────────────────────────────────────────────────
 
-def _dispatch_tool(name: str, inputs: dict, doctor_id: str = DEFAULT_DOCTOR_ID) -> str:
+def _dispatch_tool(name: str, inputs: dict, doctor_id: str = DEFAULT_DOCTOR_ID, clinic_name: str = "") -> str:
     """Maps Claude's tool calls to actual database functions.
-    doctor_id is threaded from run_clinic_agent so tools use the correct doctor context."""
+    doctor_id and clinic_name are threaded from run_clinic_agent for correct scoping."""
     try:
         if name == "get_patient":
             result = _tool_get_patient(inputs["mobile"])
         elif name == "get_clinic_doctors":
-            result = _tool_get_clinic_doctors()
+            result = _tool_get_clinic_doctors(clinic_name=clinic_name)
         elif name == "get_available_slots":
             result = _tool_get_available_slots(
                 inputs["date"],
@@ -673,7 +680,7 @@ RULES:
    - Do NOT guess or search other families
    - Ask if they want to add this person as a new family member
    - If yes, collect name+DOB+gender then call add_family_member
-7. If clinic has multiple doctors and patient doesn't specify: call get_clinic_doctors, then ask which doctor.
+7. If patient specifies a doctor by name: call get_clinic_doctors(clinic_name="{clinic_name}") to get their ID, then use it. If patient doesn't specify a doctor and there are multiple, ask which doctor they want.
 8. For booking flow:
    a. call get_available_slots(date, doctor_id)
    b. present options clearly
@@ -737,7 +744,7 @@ Reply CANCEL to cancel. Reply MENU for help.
             for block in response.content:
                 if hasattr(block, "type") and block.type == "tool_use":
                     print(f"[AGENT] Tool: {block.name}({json.dumps(block.input)[:200]})")
-                    result_str = _dispatch_tool(block.name, block.input, doctor_id)
+                    result_str = _dispatch_tool(block.name, block.input, doctor_id, clinic_name)
                     print(f"[AGENT] Result: {result_str[:200]}")
                     tool_results.append({
                         "type": "tool_result",
