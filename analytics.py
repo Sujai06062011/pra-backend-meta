@@ -216,6 +216,71 @@ def calculate_metric(doctor_id: str, metric: str, start: str, end: str) -> dict:
     return {"value": None, "error": f"Unknown metric: {metric}"}
 
 
+# ── get_appointment_breakdown ─────────────────────────────────────────────────
+
+def get_appointment_breakdown(doctor_id: str, group_by: str, period: str,
+                               n_days: int = None, start_date: str = None,
+                               end_date: str = None) -> dict:
+    """
+    Return appointment counts grouped by day_of_week, date, or session.
+    group_by: "day_of_week" | "date" | "session"
+    """
+    start, end = resolve_period_to_dates(period, n_days, start_date, end_date)
+
+    res = supabase.table("appointments").select("appointment_date, appointment_time")\
+        .eq("doctor_id", doctor_id)\
+        .gte("appointment_date", start).lte("appointment_date", end)\
+        .neq("status", "Cancelled").execute()
+    rows = res.data or []
+
+    if group_by == "day_of_week":
+        from collections import defaultdict
+        counts: dict = defaultdict(int)
+        for r in rows:
+            d = date.fromisoformat(r["appointment_date"])
+            day_name = d.strftime("%A")  # Monday, Tuesday, ...
+            counts[day_name] += 1
+        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        breakdown = [{"day": day, "count": counts.get(day, 0)} for day in day_order if day in counts or counts]
+        busiest = max(breakdown, key=lambda x: x["count"]) if breakdown else None
+        return {
+            "group_by": "day_of_week",
+            "period": period,
+            "date_range": f"{start} to {end}",
+            "breakdown": breakdown,
+            "busiest": busiest,
+        }
+
+    if group_by == "date":
+        from collections import defaultdict
+        counts: dict = defaultdict(int)
+        for r in rows:
+            counts[r["appointment_date"]] += 1
+        breakdown = sorted([{"date": d, "count": c} for d, c in counts.items()],
+                           key=lambda x: x["date"])
+        busiest = max(breakdown, key=lambda x: x["count"]) if breakdown else None
+        return {
+            "group_by": "date",
+            "period": period,
+            "date_range": f"{start} to {end}",
+            "breakdown": breakdown,
+            "busiest": busiest,
+        }
+
+    if group_by == "session":
+        morning = sum(1 for r in rows if (r.get("appointment_time") or "00:00") < "13:00")
+        evening = len(rows) - morning
+        return {
+            "group_by": "session",
+            "period": period,
+            "date_range": f"{start} to {end}",
+            "breakdown": [{"session": "morning", "count": morning},
+                          {"session": "evening", "count": evening}],
+        }
+
+    return {"error": f"Unknown group_by: {group_by}. Use day_of_week, date, or session."}
+
+
 # ── get_stats ──────────────────────────────────────────────────────────────────
 
 def get_stats(doctor_id: str, metric: str, period: str,

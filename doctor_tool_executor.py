@@ -19,6 +19,7 @@ from analytics import (
     get_patient_list as _get_patient_list,
     get_patient_detail as _get_patient_detail,
     get_pending_items as _get_pending_items,
+    get_appointment_breakdown as _get_appointment_breakdown,
 )
 
 
@@ -54,6 +55,16 @@ async def execute_doctor_tool(tool_name: str, tool_input: dict) -> dict:
 
     elif tool_name == "get_pending_items":
         return _get_pending_items(tool_input["doctor_id"])
+
+    elif tool_name == "get_appointment_breakdown":
+        return _get_appointment_breakdown(
+            doctor_id=tool_input["doctor_id"],
+            group_by=tool_input["group_by"],
+            period=tool_input["period"],
+            n_days=tool_input.get("n_days"),
+            start_date=tool_input.get("start_date"),
+            end_date=tool_input.get("end_date"),
+        )
 
     elif tool_name == "get_current_queue_status":
         q = get_queue_status(tool_input["doctor_id"])

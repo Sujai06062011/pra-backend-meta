@@ -112,6 +112,28 @@ DOCTOR_AGENT_TOOLS = [
         },
     },
     {
+        "name": "get_appointment_breakdown",
+        "description": (
+            "Break down appointment counts by day_of_week, date, or session over a period. "
+            "Use this when the doctor asks about busiest day, daily patterns, morning vs evening split, "
+            "or any question that needs a grouped view rather than a single total. "
+            "group_by options: 'day_of_week' (Mon-Sun totals), 'date' (per-day in range), 'session' (morning/evening). "
+            "Returns breakdown list and 'busiest' entry. GOLDEN RULE: READ-ONLY."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doctor_id": {"type": "string"},
+                "group_by": {"type": "string", "enum": ["day_of_week", "date", "session"]},
+                "period": {"type": "string"},
+                "n_days": {"type": "integer"},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+            },
+            "required": ["doctor_id", "group_by", "period"],
+        },
+    },
+    {
         "name": "get_current_queue_status",
         "description": "Get the live queue status — current token being served, total waiting.",
         "input_schema": {
