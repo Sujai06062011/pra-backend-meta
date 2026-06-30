@@ -132,6 +132,24 @@ def get_availability_for_date(
         all_cfg.get(f"{p}.slot_duration_minutes") or cfg["duration"]
     )
 
+    # Tier 0: doctor_holidays — highest priority, always blocks the date
+    holiday_res = supabase.table("doctor_holidays") \
+        .select("reason") \
+        .eq("doctor_id", doctor_id) \
+        .eq("holiday_date", date_str) \
+        .execute()
+    if holiday_res.data:
+        reason = holiday_res.data[0].get("reason") or "Holiday"
+        return {
+            "date": date_str,
+            "is_holiday": True,
+            "holiday_name": reason,
+            "has_override": True,
+            "slot_duration_minutes": slot_duration,
+            "morning": {"enabled": False, "start": cfg["morning_start"], "end": cfg["morning_end"]},
+            "evening": {"enabled": False, "start": cfg["evening_start"], "end": cfg["evening_end"]},
+        }
+
     # Tier 1: per-date override
     res = supabase.table("clinic_availability") \
         .select("*") \
