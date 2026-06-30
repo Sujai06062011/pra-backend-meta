@@ -87,6 +87,22 @@ DOCTOR_AGENT_TOOLS = [
         },
     },
     {
+        "name": "remove_holiday",
+        "description": (
+            "Remove a holiday for a date — deletes the doctor_holidays row so the date "
+            "becomes bookable again with normal slots. No confirmation required; "
+            "this is non-destructive (restores availability, doesn't delete patient data)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doctor_id": {"type": "string"},
+                "date": {"type": "string", "description": "YYYY-MM-DD"},
+            },
+            "required": ["doctor_id", "date"],
+        },
+    },
+    {
         "name": "preview_cancel_all_appointments",
         "description": (
             "Preview impact of cancelling all appointments for a date WITHOUT executing. "
@@ -198,6 +214,32 @@ CRITICAL SAFETY RULES — NON-NEGOTIABLE:
 7. All times are IST. Resolve "today", "tomorrow", "this evening" relative to {today_date}."""
 
 
+def _validate_history(history: list) -> list:
+    """Remove tool_result blocks whose tool_use is no longer in history (orphans from trimming)."""
+    tool_use_ids = set()
+    for msg in history:
+        if msg.get("role") == "assistant":
+            for block in (msg.get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_use_ids.add(block["id"])
+
+    clean = []
+    for msg in history:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                filtered = [
+                    b for b in content
+                    if not (isinstance(b, dict) and b.get("type") == "tool_result"
+                            and b.get("tool_use_id") not in tool_use_ids)
+                ]
+                if not filtered:
+                    continue
+                msg = {**msg, "content": filtered}
+        clean.append(msg)
+    return clean
+
+
 def _serialize_content(content) -> list:
     """Convert Anthropic SDK content blocks to JSON-safe dicts for history persistence."""
     if isinstance(content, str):
@@ -240,7 +282,7 @@ async def run_doctor_agent(
         doctor_id=doctor_id,
     )
 
-    messages = list(conversation_history) + [{"role": "user", "content": message}]
+    messages = _validate_history(list(conversation_history)) + [{"role": "user", "content": message}]
     client = _get_client()
 
     for _ in range(10):

@@ -47,6 +47,19 @@ async def execute_doctor_tool(tool_name: str, tool_input: dict) -> dict:
     elif tool_name == "get_pending_queries":
         return {"queries": get_unanswered_queries(tool_input["doctor_id"])}
 
+    elif tool_name == "remove_holiday":
+        doctor_id = tool_input["doctor_id"]
+        date_str = tool_input["date"]
+        try:
+            supabase.table("doctor_holidays").delete()\
+                .eq("doctor_id", doctor_id)\
+                .eq("holiday_date", date_str)\
+                .execute()
+            return {"success": True, "date": date_str,
+                    "message": f"Holiday removed for {date_str}. Normal slots are now available."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     elif tool_name == "preview_cancel_all_appointments":
         session = tool_input.get("session", "both")
         appts = get_appointments_for_date(
