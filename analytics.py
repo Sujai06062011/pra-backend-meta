@@ -427,18 +427,28 @@ def _search_patient_by_name(doctor_id: str, name: str) -> list:
 
 def _get_last_visit(doctor_id: str, patient_id: str) -> dict | None:
     res = supabase.table("visits").select(
-        "id, diagnosis, created_at, follow_up_date, "
-        "prescription_medicines:prescriptions(prescription_medicines(medicine_name, dosage))"
+        "id, diagnosis, created_at, follow_up_date"
     ).eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
      .order("created_at", desc=True).limit(1).execute()
     if not res.data:
         return None
     v = res.data[0]
-    # Flatten prescription summary
+
+    # Fetch prescription medicines via separate query (two-hop join not supported in supabase-py)
     pres_list = []
-    for pres in (v.get("prescription_medicines") or []):
-        for med in (pres.get("prescription_medicines") or []):
-            pres_list.append(f"{med.get('medicine_name','')} {med.get('dosage','')}".strip())
+    try:
+        pres_res = supabase.table("prescriptions").select(
+            "prescription_medicines(medicine_name, dosage)"
+        ).eq("visit_id", v["id"]).limit(1).execute()
+        for pres in (pres_res.data or []):
+            for med in (pres.get("prescription_medicines") or []):
+                name = med.get("medicine_name", "").strip()
+                dose = med.get("dosage", "").strip()
+                if name:
+                    pres_list.append(f"{name} {dose}".strip())
+    except Exception:
+        pass
+
     return {
         "date": str(v.get("created_at", ""))[:10],
         "diagnosis": v.get("diagnosis", ""),
