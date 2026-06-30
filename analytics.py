@@ -477,29 +477,50 @@ def _current_session_now() -> str:
 
 
 def _search_patient_by_name(doctor_id: str, name: str) -> list:
-    """Search patients scoped to this doctor's history only."""
-    res = supabase.table("appointments").select("patient_id")\
-        .eq("doctor_id", doctor_id)\
-        .neq("status", "Cancelled").execute()
-    pids = list(set(r["patient_id"] for r in (res.data or [])))
-    if not pids:
+    """Search patients by name, scoped to this doctor's appointment history."""
+    # Step 1: find patients whose name matches (case-insensitive)
+    try:
+        pat_res = supabase.table("patients").select("id, name, mobile, age, gender")\
+            .filter("name", "ilike", f"%{name}%").execute()
+        all_matches = pat_res.data or []
+    except Exception as e:
+        print(f"[ANALYTICS] _search_patient_by_name patient lookup failed: {e}")
         return []
-    pat_res = supabase.table("patients").select("id, name, mobile, age, gender")\
-        .in_("id", pids)\
-        .ilike("name", f"%{name}%").execute()
-    return pat_res.data or []
+
+    if not all_matches:
+        return []
+
+    # Step 2: for each candidate, confirm they have an appointment with this doctor
+    # Do this per-patient to avoid large .in_() lists
+    confirmed = []
+    for p in all_matches:
+        try:
+            chk = supabase.table("appointments").select("id")\
+                .eq("doctor_id", doctor_id)\
+                .eq("patient_id", p["id"])\
+                .limit(1).execute()
+            if chk.data:
+                confirmed.append(p)
+        except Exception:
+            pass
+
+    return confirmed
 
 
 def _get_last_visit(doctor_id: str, patient_id: str) -> dict | None:
-    res = supabase.table("visits").select(
-        "id, diagnosis, created_at, follow_up_date"
-    ).eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
-     .order("created_at", desc=True).limit(1).execute()
-    if not res.data:
+    try:
+        res = supabase.table("visits").select(
+            "id, diagnosis, created_at, follow_up_date"
+        ).eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
+         .order("created_at", desc=True).limit(1).execute()
+        if not res.data:
+            return None
+        v = res.data[0]
+    except Exception as e:
+        print(f"[ANALYTICS] _get_last_visit visits query failed: {e}")
         return None
-    v = res.data[0]
 
-    # Fetch prescription medicines via separate query (two-hop join not supported in supabase-py)
+    # Fetch prescription medicines separately (supabase-py can't do two-hop joins)
     pres_list = []
     try:
         pres_res = supabase.table("prescriptions").select(
@@ -507,12 +528,12 @@ def _get_last_visit(doctor_id: str, patient_id: str) -> dict | None:
         ).eq("visit_id", v["id"]).limit(1).execute()
         for pres in (pres_res.data or []):
             for med in (pres.get("prescription_medicines") or []):
-                name = med.get("medicine_name", "").strip()
+                med_name = med.get("medicine_name", "").strip()
                 dose = med.get("dosage", "").strip()
-                if name:
-                    pres_list.append(f"{name} {dose}".strip())
+                if med_name:
+                    pres_list.append(f"{med_name} {dose}".strip())
     except Exception:
-        pass
+        pass  # prescription summary is optional
 
     return {
         "date": str(v.get("created_at", ""))[:10],
@@ -523,11 +544,15 @@ def _get_last_visit(doctor_id: str, patient_id: str) -> dict | None:
 
 
 def _get_visit_count_this_year(doctor_id: str, patient_id: str) -> int:
-    year_start = date.today().replace(month=1, day=1).isoformat()
-    res = supabase.table("visits").select("id", count="exact")\
-        .eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
-        .gte("created_at", year_start).execute()
-    return res.count or 0
+    try:
+        year_start = date.today().replace(month=1, day=1).isoformat()
+        res = supabase.table("visits").select("id", count="exact")\
+            .eq("doctor_id", doctor_id).eq("patient_id", patient_id)\
+            .gte("created_at", year_start).execute()
+        return res.count or 0
+    except Exception as e:
+        print(f"[ANALYTICS] _get_visit_count_this_year failed: {e}")
+        return 0
 
 
 def _get_latest_followup_status(patient_id: str) -> str | None:
@@ -602,9 +627,13 @@ def get_patient_detail(doctor_id: str, patient_ref: str, session: str = None) ->
             }
         patient_id = matches[0]["id"]
 
-    pat_res = supabase.table("patients").select("name, age, gender, mobile")\
-        .eq("id", patient_id).single().execute()
-    patient = pat_res.data or {}
+    try:
+        pat_res = supabase.table("patients").select("name, age, gender, mobile")\
+            .eq("id", patient_id).limit(1).execute()
+        patient = pat_res.data[0] if pat_res.data else {}
+    except Exception as e:
+        print(f"[ANALYTICS] get_patient_detail patient lookup failed: {e}")
+        patient = {}
 
     last_visit = _get_last_visit(doctor_id, patient_id)
     visit_count = _get_visit_count_this_year(doctor_id, patient_id)
