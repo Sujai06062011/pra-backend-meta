@@ -79,11 +79,13 @@ DOCTOR_AGENT_TOOLS = [
         "name": "get_patient_detail",
         "description": (
             "Get a deep-dive on a single patient scoped to this doctor's history. "
-            "Pass patient_ref='next_in_queue' to get the next waiting patient's context card. "
-            "Or pass patient_ref='<name search>' (e.g. 'Priya') to find by name. "
-            "Returns: last diagnosis, last prescription summary, followup status, "
-            "visit count this year, pending query (if any), is_regular flag. "
-            "If name is ambiguous, returns status='ambiguous' with match list. "
+            "patient_ref options: "
+            "'next_in_queue' → next waiting patient; "
+            "'<name>' (e.g. 'Priya', 'Praveen Kumar M') → search by name; "
+            "'<mobile>' (e.g. '+91 95000 59982' or '9500059982') → lookup by mobile number. "
+            "Use mobile lookup when a name search returns status='ambiguous' and the doctor provides a number. "
+            "Returns: last diagnosis, prescription summary, followup status, visit count, pending query. "
+            "If ambiguous, returns status='ambiguous' with match list including mobile numbers. "
             "GOLDEN RULE: READ-ONLY. No confirmation required."
         ),
         "input_schema": {

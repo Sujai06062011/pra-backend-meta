@@ -479,30 +479,28 @@ def _current_session_now() -> str:
 def _name_matches(stored_name: str, query: str) -> bool:
     """
     Check if a stored patient name matches a doctor's search query.
-    Handles mismatches like "Sujai Kumar" vs "Sujaikumar" (one word vs two).
+    Handles mismatches like "Sujai Kumar" vs "Sujaikumar".
     All comparison is case-insensitive.
     """
     stored = stored_name.lower().strip()
     q = query.lower().strip()
 
-    # Exact substring match: "sujai kumar" in "sujai kumar" or "sujaikumar" in "sujaikumar"
+    # 1. Query is a substring of stored: "praveen" → matches "praveen kumar m"
     if q in stored:
         return True
 
-    # Stored name contains all query words: "sujai" + "kumar" both in "sujai kumar"
-    q_words = q.split()
-    if all(w in stored for w in q_words):
-        return True
-
-    # Query without spaces matches stored without spaces: "sujaikumar" == "sujai kumar" → "sujaikumar"
+    # 2. Space-stripped equivalence: "sujaikumar" == "sujai kumar"
     if q.replace(" ", "") == stored.replace(" ", ""):
         return True
 
-    # Query tokens appear in stored name tokens (partial first-name match)
-    stored_words = stored.split()
-    for q_word in q_words:
-        if len(q_word) >= 4 and any(q_word in sw for sw in stored_words):
-            return True
+    # 3. ALL meaningful query words appear in stored name
+    #    Skip single-char words (initials like "M") to avoid false positives.
+    #    "Praveen Kumar M" query: words = ["praveen", "kumar"]
+    #    → both must appear in stored; "praveen" alone fails for stored="Praveen Kumar M"
+    #    because "kumar" is NOT in stored="praveen".
+    q_words = [w for w in q.split() if len(w) >= 3]
+    if q_words and all(qw in stored for qw in q_words):
+        return True
 
     return False
 
@@ -642,16 +640,42 @@ def get_patient_detail(doctor_id: str, patient_ref: str, session: str = None) ->
             doctor_id=doctor_id, date_str=today
         )
     else:
-        matches = _search_patient_by_name(doctor_id, patient_ref)
-        if not matches:
-            return {"status": "not_found", "message": f"No patient found matching '{patient_ref}'"}
-        if len(matches) > 1:
-            return {
-                "status": "ambiguous",
-                "message": f"Multiple patients match '{patient_ref}'",
-                "matches": [{"name": m["name"], "mobile": m.get("mobile", "")} for m in matches],
-            }
-        patient_id = matches[0]["id"]
+        # Mobile number lookup: e.g. "+91 95000 59982" or "9500059982"
+        digits_only = "".join(c for c in patient_ref if c.isdigit())
+        if len(digits_only) >= 10:
+            mobile_suffix = digits_only[-10:]  # last 10 digits
+            try:
+                mob_res = supabase.table("appointments")\
+                    .select("patient_id, patients(id, name, mobile, age, gender)")\
+                    .eq("doctor_id", doctor_id)\
+                    .execute()
+                mobile_match = None
+                for r in (mob_res.data or []):
+                    pat = r.get("patients") or {}
+                    stored_mobile = "".join(c for c in (pat.get("mobile") or "") if c.isdigit())
+                    if stored_mobile.endswith(mobile_suffix):
+                        mobile_match = pat
+                        break
+            except Exception as e:
+                print(f"[ANALYTICS] mobile lookup failed: {e}")
+                mobile_match = None
+
+            if mobile_match:
+                patient_id = mobile_match["id"]
+            else:
+                return {"status": "not_found", "message": f"No patient found with mobile '{patient_ref}'"}
+        else:
+            # Name search
+            matches = _search_patient_by_name(doctor_id, patient_ref)
+            if not matches:
+                return {"status": "not_found", "message": f"No patient found matching '{patient_ref}'"}
+            if len(matches) > 1:
+                return {
+                    "status": "ambiguous",
+                    "message": f"Multiple patients match '{patient_ref}'",
+                    "matches": [{"name": m["name"], "mobile": m.get("mobile", "")} for m in matches],
+                }
+            patient_id = matches[0]["id"]
 
     try:
         pat_res = supabase.table("patients").select("name, age, gender, mobile")\
