@@ -146,8 +146,10 @@ DOCTOR_AGENT_TOOLS = [
         "name": "mark_holiday_confirmed",
         "description": (
             "EXECUTES marking a date as holiday: inserts into doctor_holidays, "
-            "cancels all appointments for that date, notifies affected patients. "
-            "ONLY call after doctor's message contains the EXACT phrase 'YES CANCEL ALL'."
+            "cancels any existing appointments, notifies affected patients. "
+            "If preview_mark_holiday returned count=0 (no appointments to cancel), "
+            "call this IMMEDIATELY without asking for confirmation — nothing destructive is happening. "
+            "If count > 0, ONLY call after doctor replies with the EXACT phrase 'YES CANCEL ALL'."
         ),
         "input_schema": {
             "type": "object",
@@ -168,25 +170,32 @@ Today: {today_date}
 Doctor ID: {doctor_id}
 
 CRITICAL SAFETY RULES — NON-NEGOTIABLE:
-1. For ANY destructive action (cancel_all_appointments_confirmed, mark_holiday_confirmed):
-   STEP A: Call the preview tool first. Show exactly what will be affected — count, patient names, session/date.
+1. For cancel_all_appointments_confirmed:
+   STEP A: Call preview_cancel_all_appointments first. Show count, patient names, session/date.
    End your message with: "Reply YES CANCEL ALL to confirm, or say no to cancel this action."
-   STEP B: ONLY call the _confirmed tool if the doctor's NEXT message contains the EXACT phrase "YES CANCEL ALL".
-   A plain "yes", "ok", "sure", "go ahead" is NOT enough. If they reply with anything else, ask again.
-   Never skip step A. Never combine preview + execution in one response.
+   STEP B: ONLY call cancel_all_appointments_confirmed if doctor replies with the EXACT phrase "YES CANCEL ALL".
+   A plain "yes", "ok", "sure" is NOT enough. Never skip step A.
 
-2. Read-only queries (stats, queue, followups, queries) → answer directly, no confirmation needed.
+2. For mark_holiday_confirmed:
+   STEP A: Always call preview_mark_holiday first.
+   STEP B (conditional):
+   - If preview returns count=0 (no appointments): call mark_holiday_confirmed IMMEDIATELY in the same response.
+     Tell the doctor: "✅ [date] marked as holiday. No appointments were affected."
+   - If preview returns count>0: show the patient list, end with "Reply YES CANCEL ALL to confirm."
+     ONLY call mark_holiday_confirmed after doctor replies with the EXACT phrase "YES CANCEL ALL".
 
-3. Keep replies short and scannable. Doctors are busy. Use numbers, not paragraphs.
+3. Read-only queries (stats, queue, followups, queries) → answer directly, no confirmation needed.
+
+4. Keep replies short and scannable. Doctors are busy. Use numbers, not paragraphs.
    Bad: "You have a total of fifteen appointments scheduled..."
    Good: "📋 Today: 8 morning | 7 evening | 15 total"
 
-4. If the request is ambiguous (e.g. "cancel today" without specifying session), ask which session.
+5. If the request is ambiguous (e.g. "cancel today" without specifying session), ask which session.
    Only default to "both" if doctor directly confirms with YES CANCEL ALL without specifying.
 
-5. Never make up data. If a tool returns empty or errors, say so honestly.
+6. Never make up data. If a tool returns empty or errors, say so honestly.
 
-6. All times are IST. Resolve "today", "tomorrow", "this evening" relative to {today_date}."""
+7. All times are IST. Resolve "today", "tomorrow", "this evening" relative to {today_date}."""
 
 
 def _serialize_content(content) -> list:
