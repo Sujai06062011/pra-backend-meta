@@ -2220,8 +2220,32 @@ async def list_appointments(doctor_id: str, date: str = "", date_from: str = "",
 @app.patch("/appointments/{appointment_id}/status")
 async def update_appointment_status(appointment_id: str, request: Request):
     from database import supabase
+    import datetime as dt
     body = await request.json()
-    result = supabase.table("appointments").update({"status": body["status"]}).eq("id", appointment_id).execute()
+    new_status = body.get("status")
+
+    VALID_STATUSES = {"Confirmed", "In Progress", "Completed", "Cancelled", "No-Show", "Late"}
+    if new_status not in VALID_STATUSES:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
+
+    update_payload: dict = {"status": new_status}
+
+    if new_status == "Confirmed":
+        # Revert from Late → Confirmed: set returned_at from body or now
+        returned_at = body.get("returned_at")
+        if returned_at:
+            update_payload["returned_at"] = returned_at
+        else:
+            # Check if the appointment was previously Late before setting returned_at
+            prev = supabase.table("appointments").select("status").eq("id", appointment_id).limit(1).execute()
+            if prev.data and prev.data[0].get("status") == "Late":
+                update_payload["returned_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    elif new_status == "Late":
+        # Clear returned_at when marking Late
+        update_payload["returned_at"] = None
+
+    result = supabase.table("appointments").update(update_payload).eq("id", appointment_id).execute()
     return result.data[0] if result.data else {}
 
 

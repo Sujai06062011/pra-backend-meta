@@ -431,6 +431,29 @@ async def send_review_requests():
             print(f"❌ Error sending review request: {e}")
 
 
+async def mark_late_as_no_show():
+    """
+    EOD job: any appointment still in 'Late' status at end of day becomes 'No-Show'.
+    Runs once daily at 22:00 IST (after all clinics close).
+    """
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    print(f"🕙 EOD: Converting remaining Late → No-Show for {today}")
+    try:
+        result = (
+            supabase.table("appointments")
+            .update({"status": "No-Show"})
+            .eq("status", "Late")
+            .eq("appointment_date", today)
+            .execute()
+        )
+        count = len(result.data or [])
+        print(f"   ✅ Marked {count} Late appointment(s) as No-Show")
+    except Exception as e:
+        print(f"   ❌ mark_late_as_no_show failed: {e}")
+
+
 def _populate_scheduler(scheduler: AsyncIOScheduler):
     """Add per-doctor jobs to the scheduler. Called by init and reschedule."""
     from followup import send_followup_whatsapp_job, make_followup_calls_job, mark_no_response_followups
@@ -498,6 +521,17 @@ def _populate_scheduler(scheduler: AsyncIOScheduler):
         misfire_grace_time=300,
     )
     print("   ✅ [Global] No-Response Marker: 09:00 IST")
+
+    # EOD Late → No-Show: runs once at 22:00 IST after all clinics close
+    scheduler.add_job(
+        mark_late_as_no_show,
+        CronTrigger(hour=22, minute=0, timezone="Asia/Kolkata"),
+        id="late_to_no_show_eod",
+        name="EOD Late → No-Show",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    print("   ✅ [Global] EOD Late → No-Show: 22:00 IST")
 
 
 async def init_scheduler() -> AsyncIOScheduler:
