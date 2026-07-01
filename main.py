@@ -2186,6 +2186,8 @@ def _annotate_display_tokens(appointments: list, doctor_id: str) -> list:
             a["queue_status"] = "Cancelled"
         elif a.get("status") == "Completed":
             a["queue_status"] = "Done"
+        elif a.get("status") == "Late":
+            a["queue_status"] = "Late"
         elif (cur and a.get("token_number") == cur) or a.get("status") == "In Progress":
             a["queue_status"] = "In Progress"
         elif st and t and t < st:
