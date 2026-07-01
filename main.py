@@ -4022,7 +4022,32 @@ async def get_appointment_slots(doctor_id: str, date: str):
 
     # Respect availability overrides
     av = get_availability_for_date(doctor_id, date)
-    dur = av.get("slot_duration_minutes") or cfg_full["duration"]
+
+    # If this date already has appointments, infer slot duration from their actual times
+    # so that changing slot config doesn't orphan existing bookings
+    existing_res = supabase.table("appointments")\
+        .select("appointment_time")\
+        .eq("doctor_id", doctor_id)\
+        .eq("appointment_date", date)\
+        .in_("status", ["Confirmed", "In Progress", "Completed"])\
+        .order("appointment_time")\
+        .execute()
+    existing_times = sorted(set(
+        (a["appointment_time"] or "")[:5]
+        for a in (existing_res.data or [])
+        if a.get("appointment_time")
+    ))
+    if len(existing_times) >= 2:
+        # Infer duration from smallest gap between consecutive booked slots
+        from datetime import datetime as _dt
+        gaps = []
+        for i in range(len(existing_times) - 1):
+            t1 = _dt.strptime(existing_times[i], "%H:%M")
+            t2 = _dt.strptime(existing_times[i + 1], "%H:%M")
+            gaps.append(int((t2 - t1).total_seconds() // 60))
+        dur = min(gaps)
+    else:
+        dur = av.get("slot_duration_minutes") or cfg_full["duration"]
 
     def parse_t(s):
         h, m_ = map(int, s.split(":"))
