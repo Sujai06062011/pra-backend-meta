@@ -265,7 +265,6 @@ async def send_daily_doctor_summary():
     at their configured time (scheduler.daily_summary.time, default 08:00 IST).
     Each doctor is wrapped in try/except so one failure never blocks others.
     """
-    print("📊 Running: Daily Doctor Summary check")
     from analytics import get_stats as _get_stats, get_pending_items as _get_pending_items
 
     doctors = await get_all_active_doctors()
@@ -276,6 +275,7 @@ async def send_daily_doctor_summary():
             )
             if not _is_current_time_match(configured_time):
                 continue
+            print(f"📊 Running: Daily Doctor Summary for {doctor.get('name', '?')}")
 
             if not config_loader.is_enabled("daily_summary", doctor["id"]):
                 continue

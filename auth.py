@@ -23,6 +23,7 @@ def create_token(staff: dict) -> str:
         "doctor_id": staff.get("doctor_id"),
         "clinic_whatsapp": staff["clinic_whatsapp"],
         "name": staff["name"],
+        "speciality": staff.get("speciality", ""),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -50,6 +51,14 @@ async def login_staff(supabase, username: str, pin: str) -> dict | None:
         staff = rows[0]
         if staff.get("pin_hash") != pin_hash:
             return None
+        # Fetch doctor specialty if this is a doctor account
+        speciality = ""
+        doctor_id = staff.get("doctor_id")
+        if doctor_id:
+            dr = supabase.table("doctors").select("speciality").eq("id", doctor_id).limit(1).execute()
+            if dr.data:
+                speciality = dr.data[0].get("speciality") or ""
+        staff["speciality"] = speciality
         token = create_token(staff)
         return {
             "token": token,
@@ -57,8 +66,9 @@ async def login_staff(supabase, username: str, pin: str) -> dict | None:
             "name": staff["name"],
             "username": staff["username"],
             "role": staff["role"],
-            "doctor_id": staff.get("doctor_id"),
+            "doctor_id": doctor_id,
             "clinic_whatsapp": staff["clinic_whatsapp"],
+            "speciality": speciality,
         }
     except Exception as e:
         print(f"[AUTH] login error: {e}")
