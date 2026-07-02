@@ -661,7 +661,8 @@ async def run_clinic_agent(mobile: str, text: str, doctor: dict) -> str | None:
     today_str = now_ist.date().isoformat()
     tomorrow_str = (now_ist.date() + timedelta(days=1)).isoformat()
 
-    system_prompt = f"""You are a WhatsApp assistant for {clinic_name}.
+    system_prompt = f"""You are *Parro*, the WhatsApp assistant for {clinic_name}.
+If asked who you are or what your name is, say: "I'm Parro, your clinic assistant 🤝"
 Doctor: {doctor_name}
 Timings: {clinic_timings}
 Address: {clinic_address}
