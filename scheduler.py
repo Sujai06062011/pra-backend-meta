@@ -245,18 +245,30 @@ def _is_current_time_match(time_str: str) -> bool:
 def _format_daily_summary(doctor: dict, today_appts: int, yesterday_seen: int,
                            pending: dict) -> str:
     name = doctor.get("name", "Doctor")
-    return (
-        f"Good morning {name}! 🌅\n\n"
-        f"Today's Schedule:\n"
-        f"📋 {today_appts} appointments booked\n\n"
-        f"Yesterday:\n"
-        f"✅ {yesterday_seen} patients seen\n\n"
-        f"Pending:\n"
-        f"💬 {pending.get('followup_concerns', 0)} follow-up concerns\n"
-        f"🔔 {pending.get('pending_queries', 0)} unanswered queries\n"
-        f"🔬 {pending.get('pending_lab_reports', 0)} lab reports\n\n"
-        f"Have a great day! 🙏"
-    )
+    lines = [f"🌅 *Good morning, {name}!*", ""]
+
+    lines.append(f"📋 *Today's Schedule*")
+    lines.append(f"👥 {today_appts} appointment{'s' if today_appts != 1 else ''} booked")
+    lines.append("")
+
+    lines.append(f"✅ *Yesterday*")
+    lines.append(f"{yesterday_seen} patient{'s' if yesterday_seen != 1 else ''} seen")
+    lines.append("")
+
+    followup_concerns = pending.get("followup_concerns", 0)
+    pending_queries   = pending.get("pending_queries", 0)
+    pending_lab       = pending.get("pending_lab_reports", 0)
+    total_pending     = followup_concerns + pending_queries + pending_lab
+
+    if total_pending > 0:
+        lines.append(f"⚠️ *Pending attention*")
+        if followup_concerns: lines.append(f"💬 {followup_concerns} follow-up concern{'s' if followup_concerns != 1 else ''}")
+        if pending_queries:   lines.append(f"🔔 {pending_queries} unanswered {'query' if pending_queries == 1 else 'queries'}")
+        if pending_lab:       lines.append(f"🔬 {pending_lab} lab report{'s' if pending_lab != 1 else ''} to review")
+        lines.append("")
+
+    lines.append("Have a great day! 🙏")
+    return "\n".join(lines)
 
 
 async def send_daily_doctor_summary():
