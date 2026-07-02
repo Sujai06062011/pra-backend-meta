@@ -282,6 +282,15 @@ async def get_availability_range(
         .execute()
     overrides = {r["availability_date"]: r for r in (res.data or [])}
 
+    # Fetch doctor_holidays in range (Tier 0 — highest priority, from doctor agent)
+    hol_res = supabase.table("doctor_holidays") \
+        .select("holiday_date, reason") \
+        .eq("doctor_id", doctor_id) \
+        .gte("holiday_date", start_date) \
+        .lte("holiday_date", end_date) \
+        .execute()
+    holidays = {r["holiday_date"]: r.get("reason") or "Holiday" for r in (hol_res.data or [])}
+
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end   = datetime.strptime(end_date,   "%Y-%m-%d").date()
 
@@ -289,6 +298,18 @@ async def get_availability_range(
     current = start
     while current <= end:
         date_str = current.isoformat()
+        # Tier 0: doctor_holidays (from doctor agent) takes highest priority
+        if date_str in holidays:
+            results.append({
+                "date": date_str,
+                "is_holiday": True,
+                "holiday_name": holidays[date_str],
+                "has_override": True,
+                "morning": {"enabled": False, "start": cfg["morning_start"], "end": cfg["morning_end"]},
+                "evening": {"enabled": False, "start": cfg["evening_start"], "end": cfg["evening_end"]},
+            })
+            current += timedelta(days=1)
+            continue
         row = overrides.get(date_str)
         if row:
             results.append({
