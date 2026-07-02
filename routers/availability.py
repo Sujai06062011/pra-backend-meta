@@ -410,11 +410,17 @@ async def set_availability(payload: AvailabilityPayload):
 
 @router.delete("/{avail_date}")
 async def delete_availability(avail_date: str, doctor_id: str = Query(...)):
-    """Delete availability override — restores date to full clinic defaults."""
+    """Delete availability override — restores date to full clinic defaults.
+    Also removes any doctor_holidays entry so agent-set holidays are cleared."""
     supabase.table("clinic_availability") \
         .delete() \
         .eq("doctor_id", doctor_id) \
         .eq("availability_date", avail_date) \
+        .execute()
+    supabase.table("doctor_holidays") \
+        .delete() \
+        .eq("doctor_id", doctor_id) \
+        .eq("holiday_date", avail_date) \
         .execute()
     return {"deleted": True, "date": avail_date}
 
