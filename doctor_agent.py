@@ -238,6 +238,42 @@ DOCTOR_AGENT_TOOLS = [
         },
     },
     {
+        "name": "get_patient_age_breakdown",
+        "description": (
+            "Return the age distribution of all unique patients seen by this doctor, "
+            "grouped into buckets: 0-5, 6-12, 13-17, 18-30, 31-50, 51-70, 70+. "
+            "Use when the doctor asks about age groups, age demographics, patient age mix, "
+            "or which age group has the most patients. GOLDEN RULE: READ-ONLY."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"doctor_id": {"type": "string"}},
+            "required": ["doctor_id"],
+        },
+    },
+    {
+        "name": "get_diagnosis_breakdown",
+        "description": (
+            "Return the top diagnoses (from the visits table) by frequency for this doctor. "
+            "Use when the doctor asks which diagnosis/condition is most common, "
+            "what diseases they see most, or diagnosis patterns. "
+            "period options: all_time, this_month, last_month, this_week, this_year, last_n_days, custom. "
+            "GOLDEN RULE: READ-ONLY."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doctor_id": {"type": "string"},
+                "period": {"type": "string", "description": "Default: all_time"},
+                "n_days": {"type": "integer", "description": "Only for last_n_days"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD, for custom"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD, for custom"},
+                "limit": {"type": "integer", "description": "Max diagnoses to return, default 10"},
+            },
+            "required": ["doctor_id"],
+        },
+    },
+    {
         "name": "mark_holiday_confirmed",
         "description": (
             "EXECUTES marking a date as holiday: inserts into doctor_holidays, "

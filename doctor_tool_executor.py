@@ -5,7 +5,8 @@ Reuses existing database.py functions wherever they exist.
 All functions are synchronous wrappers (Supabase client is sync).
 """
 
-from datetime import datetime, date
+from collections import defaultdict
+from datetime import datetime, date, timedelta
 from database import (
     supabase,
     get_queue_status,
@@ -123,6 +124,19 @@ async def execute_doctor_tool(tool_name: str, tool_input: dict) -> dict:
     elif tool_name == "mark_holiday_confirmed":
         return await _do_mark_holiday(tool_input)
 
+    elif tool_name == "get_patient_age_breakdown":
+        return _get_patient_age_breakdown(tool_input["doctor_id"])
+
+    elif tool_name == "get_diagnosis_breakdown":
+        return _get_diagnosis_breakdown(
+            doctor_id=tool_input["doctor_id"],
+            period=tool_input.get("period", "all_time"),
+            n_days=tool_input.get("n_days"),
+            start_date=tool_input.get("start_date"),
+            end_date=tool_input.get("end_date"),
+            limit=tool_input.get("limit", 10),
+        )
+
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -207,3 +221,104 @@ async def _do_mark_holiday(tool_input: dict) -> dict:
         "reason": reason,
     })
     return {**cancel_result, "holiday_marked": True, "reason": reason}
+
+
+def _get_patient_age_breakdown(doctor_id: str) -> dict:
+    """Return count of unique patients seen by this doctor, grouped into age buckets."""
+    try:
+        res = supabase.table("appointments")\
+            .select("patient_id, patients(age, date_of_birth)")\
+            .eq("doctor_id", doctor_id)\
+            .not_.is_("patient_id", "null")\
+            .execute()
+    except Exception as e:
+        return {"error": str(e)}
+
+    seen = {}
+    for row in (res.data or []):
+        pid = row.get("patient_id")
+        if not pid or pid in seen:
+            continue
+        p = row.get("patients") or {}
+        age = p.get("age")
+        if age is None and p.get("date_of_birth"):
+            try:
+                dob = datetime.strptime(p["date_of_birth"][:10], "%Y-%m-%d").date()
+                today = date.today()
+                age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            except Exception:
+                pass
+        seen[pid] = age
+
+    buckets = {"0-5": 0, "6-12": 0, "13-17": 0, "18-30": 0, "31-50": 0, "51-70": 0, "70+": 0, "unknown": 0}
+    for age in seen.values():
+        if age is None:
+            buckets["unknown"] += 1
+        elif age <= 5:   buckets["0-5"] += 1
+        elif age <= 12:  buckets["6-12"] += 1
+        elif age <= 17:  buckets["13-17"] += 1
+        elif age <= 30:  buckets["18-30"] += 1
+        elif age <= 50:  buckets["31-50"] += 1
+        elif age <= 70:  buckets["51-70"] += 1
+        else:            buckets["70+"] += 1
+
+    total = sum(v for k, v in buckets.items() if k != "unknown")
+    breakdown = [
+        {"age_group": k, "count": v, "pct": round(v * 100 / total, 1) if total else 0}
+        for k, v in buckets.items() if v > 0
+    ]
+    breakdown.sort(key=lambda x: -x["count"])
+    return {"total_patients": len(seen), "breakdown": breakdown}
+
+
+def _get_diagnosis_breakdown(doctor_id: str, period: str = "all_time",
+                              n_days: int = None, start_date: str = None,
+                              end_date: str = None, limit: int = 10) -> dict:
+    """Return top diagnoses by visit count for this doctor in the given period."""
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    today_ist = datetime.now(IST).date()
+
+    # Compute date filter
+    date_from = None
+    if period == "this_month":
+        date_from = today_ist.replace(day=1).isoformat()
+    elif period == "last_month":
+        first_this = today_ist.replace(day=1)
+        last_month_end = first_this - timedelta(days=1)
+        date_from = last_month_end.replace(day=1).isoformat()
+        end_date = last_month_end.isoformat()
+    elif period == "this_week":
+        date_from = (today_ist - timedelta(days=today_ist.weekday())).isoformat()
+    elif period == "last_n_days" and n_days:
+        date_from = (today_ist - timedelta(days=n_days)).isoformat()
+    elif period == "this_year":
+        date_from = today_ist.replace(month=1, day=1).isoformat()
+    elif period == "custom":
+        date_from = start_date
+
+    try:
+        q = supabase.table("visits").select("diagnosis").eq("doctor_id", doctor_id)
+        if date_from:
+            q = q.gte("visit_date", date_from)
+        if end_date:
+            q = q.lte("visit_date", end_date)
+        res = q.execute()
+    except Exception as e:
+        return {"error": str(e)}
+
+    diag_map: dict = defaultdict(int)
+    total_with_diagnosis = 0
+    for row in (res.data or []):
+        d = (row.get("diagnosis") or "").strip()
+        if d:
+            diag_map[d] += 1
+            total_with_diagnosis += 1
+
+    top = sorted([{"diagnosis": k, "count": v} for k, v in diag_map.items()],
+                 key=lambda x: -x["count"])[:limit]
+    return {
+        "total_visits_with_diagnosis": total_with_diagnosis,
+        "period": period,
+        "top_diagnoses": top,
+    }
