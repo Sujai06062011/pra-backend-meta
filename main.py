@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers.availability import router as availability_router
 from routers.schedule import router as schedule_router
 from routers.clinic_schedule import router as clinic_schedule_router
+from routers.prescription_ai_router import router as prescription_ai_router
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 import os
@@ -138,6 +139,7 @@ app.add_middleware(
 app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
+app.include_router(prescription_ai_router)
 
 # ── MCP HTTP Transport ────────────────────────────────────────────────────────
 _mcp_server = create_parro_mcp_server(supabase)
@@ -349,6 +351,21 @@ async def send_meta_text(to_number: str, message: str):
     async with httpx.AsyncClient() as client:
         r = await client.post(META_BASE_URL, json=payload, headers=headers)
         print(f"[Meta TEXT] to={to_number} status={r.status_code} body={r.text}")
+        return r.json()
+
+
+async def send_meta_document(to_number: str, doc_url: str, caption: str, filename: str):
+    """Send a PDF document via WhatsApp Cloud API."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number.lstrip("+"),
+        "type": "document",
+        "document": {"link": doc_url, "caption": caption, "filename": filename},
+    }
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        r = await client.post(META_BASE_URL, json=payload, headers=headers)
+        print(f"[Meta DOC] to={to_number} status={r.status_code}")
         return r.json()
 
 
@@ -3421,6 +3438,54 @@ async def send_prescription_whatsapp(prescription_id: str):
             msg += f"\n\nFollow-up in 7 days.\nReply MENU for any help."
 
         await send_meta_text(mobile, msg)
+
+        # Try to also send PDF attachment — never blocks text send
+        try:
+            from routers.prescription_ai_router import build_pdf_bytes
+            import uuid as _uuid
+
+            # Build PDF data dict
+            _vis_res = db.table("visits").select("chief_complaint, diagnosis, notes").eq("id", pres.get("visit_id", "")).limit(1).execute()
+            _vis = (_vis_res.data or [{}])[0]
+            _doc_q = db.table("doctors").select("name, clinic_name").eq("id", pres.get("doctor_id", "")).limit(1).execute()
+            _doc_d = (_doc_q.data or [{}])[0]
+
+            _pdf_data = {
+                "clinic_name":           _doc_d.get("clinic_name") or _clinic_name2,
+                "doctor_name":           _doc_d.get("name") or "",
+                "patient_name":          name,
+                "patient_age":           pat.get("age") or "",
+                "patient_gender":        pat.get("gender") or "",
+                "patient_code":          pcode,
+                "visit_date":            pdate_fmt,
+                "chief_complaint":       _vis.get("chief_complaint") or "",
+                "diagnosis":             _vis.get("diagnosis") or "",
+                "medicines":             medicines,
+                "dietary_instructions":  pres.get("dietary_instructions") or "",
+                "precautions":           pres.get("precautions") or "",
+                "notes":                 _vis.get("notes") or "",
+                "vitals":                {},
+            }
+            _pdf_bytes = build_pdf_bytes(_pdf_data)
+
+            # Upload to Supabase Storage
+            _bucket    = "prescription-pdfs"
+            _filename  = f"prescriptions/{_uuid.uuid4()}.pdf"
+            supabase.storage.from_(_bucket).upload(
+                _filename, _pdf_bytes,
+                {"content-type": "application/pdf", "upsert": "true"},
+            )
+            _pdf_url = supabase.storage.from_(_bucket).get_public_url(_filename)
+
+            pat_fn = name.replace(" ", "-")
+            await send_meta_document(
+                mobile,
+                _pdf_url,
+                caption=f"Prescription from Dr. {_doc_d.get('name', 'Kumar')}",
+                filename=f"Prescription-{pat_fn}-{pdate_fmt.replace(' ', '')}.pdf",
+            )
+        except Exception as _pdf_err:
+            print(f"[PDF SEND] Skipped — {_pdf_err}")
 
         db.table("prescriptions").update({"whatsapp_sent": True}).eq("id", prescription_id).execute()
 
