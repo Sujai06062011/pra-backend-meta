@@ -125,6 +125,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
+        "http://localhost:3001",
         "https://pra-frontend.vercel.app",
         "https://pra-frontend-sujai06062011.vercel.app",
         "https://www.anthropic.com",
