@@ -243,6 +243,9 @@ Return ONLY valid JSON (no markdown fences, no extra text) with exactly these fi
 {
   "chief_complaint": string or null,
   "diagnosis": string or null,
+  "past_history": string or null,
+  "allergies": string or null,
+  "lab_findings": string or null,
   "dietary_instructions": string or null,
   "precautions": string or null,
   "medicines": [
@@ -265,6 +268,10 @@ Return ONLY valid JSON (no markdown fences, no extra text) with exactly these fi
     "weight": string or null
   }
 }
+Field guidance:
+- past_history: chronic conditions, surgical history, family history mentioned (e.g. "diabetic and hypertensive for 10 years, appendix surgery 15 years ago")
+- allergies: any allergies mentioned; use "NKDA" if doctor explicitly says no known allergies
+- lab_findings: any investigation results or observations mentioned (e.g. "no abnormalities in platelet WBC")
 Never invent medical information not present in the transcript.
 Use null for fields not mentioned. Use empty array [] for medicines if none mentioned."""
 
