@@ -2059,19 +2059,22 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     )
                     new_state = "idle"
         else:
-            # Multiple patients — show selection list
-            rows = [
-                {
-                    "id": f"rxpat_{p['id']}",
-                    "title": p.get("name", "")[:24],
-                    "description": format_member_list_description(p),
-                }
-                for p in all_patients
-            ]
-            if len(all_patients) <= 3:
+            # Filter to patients who have at least one prescription
+            pat_ids = [p["id"] for p in all_patients]
+            pres_check = _supa.table("prescriptions") \
+                .select("patient_id") \
+                .in_("patient_id", pat_ids) \
+                .execute()
+            has_pres = {r["patient_id"] for r in (pres_check.data or [])}
+            with_pres = [p for p in all_patients if p["id"] in has_pres]
+            display_patients = with_pres if with_pres else all_patients
+            # Cap at 10 (WhatsApp list max) — most recent first
+            display_patients = display_patients[:10]
+
+            if len(display_patients) <= 3:
                 buttons = [
                     {"id": f"rxpat_{p['id']}", "title": format_member_button_title(p)}
-                    for p in all_patients
+                    for p in display_patients
                 ]
                 await send_meta_buttons(
                     to_number=from_number,
@@ -2079,7 +2082,15 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     buttons=buttons,
                     footer_text="Reply MENU for main menu",
                 )
-            else:
+            elif len(display_patients) <= 10:
+                rows = [
+                    {
+                        "id": f"rxpat_{p['id']}",
+                        "title": p.get("name", "")[:24],
+                        "description": format_member_list_description(p),
+                    }
+                    for p in display_patients
+                ]
                 await send_meta_list(
                     to_number=from_number,
                     body_text="📋 *My Prescriptions*\n\nWhose prescription would you like?",
@@ -2087,8 +2098,11 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     sections=[{"title": "Family members", "rows": rows}],
                     footer_text="Reply MENU for main menu",
                 )
+            else:
+                nums = "\n".join(f"{i+1}. {p.get('name', '')}" for i, p in enumerate(display_patients))
+                reply = f"📋 *My Prescriptions*\n\nReply with the number:\n\n{nums}" + MENU_HINT
             new_state = "awaiting_prescription_patient_select"
-            new_temp  = {"rx_patients": all_patients}
+            new_temp  = {"rx_patients": display_patients}
 
     elif intent == "prescription_patient_selected":
         all_patients = temp_data.get("rx_patients", [])
