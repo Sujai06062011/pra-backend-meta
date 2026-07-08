@@ -43,7 +43,8 @@ _STATE_MACHINE_STATES = {
 _SM_KEYWORDS = {
     "menu", "main menu", "back", "home", "hi", "hello", "hey",
     "start", "help", "bye", "goodbye", "exit", "end", "quit",
-    "1", "2", "3", "4", "5", "6",
+    "1", "2", "3", "4", "5", "6", "7",
+    "my prescription", "prescription", "report",
 }
 
 
