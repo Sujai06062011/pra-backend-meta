@@ -582,10 +582,10 @@ def build_pdf_bytes(data: dict) -> bytes:
         except Exception:
             fu_fmt = followup_date
         fu_style = ParagraphStyle("fu", fontSize=9, fontName="Helvetica",
-                                  textColor=HexColor("#166534"),
-                                  backColor=HexColor("#f0fdf4"),
+                                  textColor=colors.HexColor("#166534"),
+                                  backColor=colors.HexColor("#f0fdf4"),
                                   borderPad=4, borderWidth=0.5,
-                                  borderColor=HexColor("#bbf7d0"),
+                                  borderColor=colors.HexColor("#bbf7d0"),
                                   borderRadius=4, leading=14)
         story.append(Paragraph(f"<b>Follow-up Review:</b>  {fu_fmt}", fu_style))
         story.append(Spacer(1, 4*mm))
