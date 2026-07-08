@@ -830,6 +830,7 @@ async def meta_webhook_inbound(request: Request):
                         "menu_cancel_appointment": "4",
                         "menu_clinic_timings":    "5",
                         "menu_ask_doctor":        "6",
+                        "menu_my_prescriptions":  "7",
                     }
                     mapped_text = list_id_to_text.get(list_id, "MENU")
                     await handle_inbound_message(from_number, mapped_text, clinic_number)
@@ -2795,6 +2796,7 @@ async def update_prescription(prescription_id: str, request: Request, background
                 supabase.storage.from_(_bucket2).upload(_fname2, _pdf2_bytes, {"content-type": "application/pdf", "upsert": "true"})
                 _pdf2_url = supabase.storage.from_(_bucket2).get_public_url(_fname2)
                 print(f"[PDF SEND] URL: {_pdf2_url}")
+                supabase.table("prescriptions").update({"pdf_url": _pdf2_url}).eq("id", prescription_id).execute()
                 _pat_fn2 = pname.replace(" ", "-")
                 _dr = await send_meta_document(mobile, _pdf2_url,
                     caption=f"Prescription from Dr. {_doc2.get('name', 'Kumar')}",
@@ -3591,6 +3593,7 @@ async def send_prescription_whatsapp(prescription_id: str):
             print(f"[PDF SEND] upload result: {_up_res}")
             _pdf_url = supabase.storage.from_(_bucket).get_public_url(_filename)
             print(f"[PDF SEND] public URL: {_pdf_url}")
+            supabase.table("prescriptions").update({"pdf_url": _pdf_url}).eq("id", prescription_id).execute()
 
             pat_fn = name.replace(" ", "-")
             _doc_resp = await send_meta_document(

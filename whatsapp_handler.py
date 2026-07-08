@@ -55,7 +55,7 @@ def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
     if text.lower().strip() in _SM_KEYWORDS:
         return False  # Menu shortcuts → state machine
     # New patients with simple digit/keyword → state machine registration flow
-    if not is_existing and text.lower().strip() in {"1", "2", "3", "4", "5", "6",
+    if not is_existing and text.lower().strip() in {"1", "2", "3", "4", "5", "6", "7",
                                                      "hi", "hello", "hey", "start"}:
         return False
     return True
@@ -432,6 +432,7 @@ def get_main_menu_sections() -> list:
                 {"id": "menu_cancel_appointment",  "title": "Cancel Appointment",     "description": "Cancel an existing booking"},
                 {"id": "menu_clinic_timings",      "title": "Clinic Timings",         "description": "View our opening hours"},
                 {"id": "menu_ask_doctor",          "title": "Ask Doctor a Question",  "description": "Send a medical query to the doctor"},
+                {"id": "menu_my_prescriptions",    "title": "My Prescriptions",       "description": "Get your latest prescription PDF"},
             ],
         }
     ]
@@ -814,6 +815,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "timing"
     elif t == "6" or any(k in t for k in ["ask", "question", "query"]):
         intent = "ask_question"
+    elif t == "7" or any(k in t for k in ["my prescription", "prescription", "report"]):
+        intent = "my_prescriptions"
 
     # ── BUILD REPLY ───────────────────────────────────────────
     reply    = ""
@@ -2002,6 +2005,64 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
             "Reply MENU for main menu."
         )
         new_state = "idle"
+
+    # ── MY PRESCRIPTIONS ──────────────────────────────────────
+    elif intent == "my_prescriptions":
+        all_patients = get_all_linked_patients(from_number)
+        if not all_patients:
+            reply = "No patient records found for this number.\n\nReply 1 to book an appointment." + MENU_HINT
+            new_state = "idle"
+        else:
+            # Collect all patient IDs and fetch latest prescription across all of them
+            pat_ids = [p["id"] for p in all_patients]
+            pres_rows = []
+            for pid in pat_ids:
+                res = _supa.table("prescriptions") \
+                    .select("id, prescription_date, pdf_url, patient_id, patients(name, patient_code)") \
+                    .eq("patient_id", pid) \
+                    .order("prescription_date", desc=True) \
+                    .limit(1).execute()
+                if res.data:
+                    pres_rows.append(res.data[0])
+
+            if not pres_rows:
+                reply = (
+                    "No prescriptions found for your account.\n\n"
+                    "Please visit the clinic to get your prescription." + MENU_HINT
+                )
+                new_state = "idle"
+            else:
+                # Pick the most recent across all patients
+                latest = max(pres_rows, key=lambda r: r.get("prescription_date") or "")
+                pdf_url = latest.get("pdf_url") or ""
+                pat_info = latest.get("patients") or {}
+                pat_name = pat_info.get("name") or "Patient"
+                pat_code = pat_info.get("patient_code") or ""
+                pdate    = latest.get("prescription_date") or ""
+                try:
+                    import datetime as _dt
+                    pdate_fmt = _dt.date.fromisoformat(pdate).strftime("%d %b %Y")
+                except Exception:
+                    pdate_fmt = pdate
+
+                if pdf_url:
+                    # Send PDF directly — import send_meta_document lazily to avoid circular import
+                    from main import send_meta_document
+                    fn = f"Prescription-{pat_name.replace(' ','-')}-{pdate_fmt.replace(' ','')}.pdf"
+                    await send_meta_document(
+                        from_number,
+                        pdf_url,
+                        caption=f"📋 Prescription for {pat_name}" + (f" ({pat_code})" if pat_code else "") + f"\nDate: {pdate_fmt}",
+                        filename=fn,
+                    )
+                    save_conversation_state(from_number, "idle", {})
+                    return None
+                else:
+                    reply = (
+                        f"Your latest prescription is from {pdate_fmt}.\n\n"
+                        "Please ask your doctor to resend it via WhatsApp to get the PDF." + MENU_HINT
+                    )
+                    new_state = "idle"
 
     # ── MEDIA / LAB REPORT ────────────────────────────────────
     elif intent == "media":
