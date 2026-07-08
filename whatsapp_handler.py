@@ -35,7 +35,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
     "awaiting_prescription_patient_select",
-    "awaiting_lab_doc_confirm", "awaiting_lab_doc_category",
+    "awaiting_lab_doc_confirm",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -2215,18 +2215,33 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         mime     = temp_data.get("mime", "application/octet-stream")
 
         if t in ("lab_yes", "yes", "y", "yeah", "lab report", "it's my lab report"):
-            await send_meta_buttons(
-                to_number=from_number,
-                body_text="What type of test is this?",
-                buttons=[
-                    {"id": "labcat_blood",    "title": "🩸 Blood Test"},
-                    {"id": "labcat_diabetes", "title": "🍬 Diabetes/Sugar"},
-                    {"id": "labcat_thyroid",  "title": "🦋 Thyroid"},
-                ],
-                footer_text="Or type: Lipids / Kidney / Urine / Other",
-            )
-            new_state = "awaiting_lab_doc_category"
-            new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
+            # Ingest immediately — no need to ask category
+            try:
+                from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
+                _body = WhatsAppReportBody(
+                    mobile=from_number,
+                    document_url=doc_url,
+                    document_name=doc_name,
+                    mime_type=mime,
+                    test_category=None,
+                )
+                _result = await receive_whatsapp_report(_body)
+            except Exception as _le:
+                print(f"[LAB WA] report ingest error: {_le}")
+                _result = {"ok": False}
+
+            if _result.get("ok"):
+                reply = (
+                    f"✅ Your report has been received and linked to your record.\n\n"
+                    f"{doctor_name} will review it shortly. "
+                    f"You'll receive a summary once reviewed. 🏥" + MENU_HINT
+                )
+            else:
+                reply = (
+                    "Thank you! Your report has been noted. "
+                    f"{doctor_name} will follow up with you shortly." + MENU_HINT
+                )
+            new_state = "idle"
         else:
             reply = "No problem! How else can I help you?" + MENU_HINT
             new_state = "idle"

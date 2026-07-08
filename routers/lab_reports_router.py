@@ -23,6 +23,7 @@ router = APIRouter()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", "")
 _BUCKET = "lab-reports"
 
 ALLOWED_MIME = {
@@ -679,10 +680,13 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
     patient_id = patient["id"]
     doctor_id  = patient["doctor_id"]
 
-    # Download document
+    # Download document — Meta URLs require Bearer auth
     try:
+        headers = {}
+        if META_ACCESS_TOKEN and "fbsbx.com" in body.document_url:
+            headers["Authorization"] = f"Bearer {META_ACCESS_TOKEN}"
         async with httpx.AsyncClient(timeout=30) as client:
-            dl = await client.get(body.document_url)
+            dl = await client.get(body.document_url, headers=headers)
             dl.raise_for_status()
             file_bytes = dl.content
     except Exception as e:
