@@ -23,45 +23,202 @@ IST               = pytz.timezone("Asia/Kolkata")
 
 # ─── TRANSCRIBE ──────────────────────────────────────────────────────────────
 
+_SARVAM_BATCH_BASE = "https://api.sarvam.ai/speech-to-text/job/v1"
+_POLL_INTERVAL_S   = 3    # seconds between status polls
+_MAX_POLLS         = 80   # 80 × 3s = 4 min max wait
+
+
 @router.post("/prescriptions/transcribe")
 async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
     """
-    Receive audio blob from browser MediaRecorder, transcribe via Sarvam
-    saarika:v2.5 with language_code=unknown (auto-detects Tamil/English
-    code-switching and Indian pharmaceutical names).
+    Transcribe audio via Sarvam Batch STT (saaras:v3).
+    Handles any duration up to 2 hours; auto-detects Tamil/English code-switching.
+
+    Flow:
+      1. Initiate batch job
+      2. Get presigned upload URL
+      3. PUT audio to presigned URL
+      4. Start job
+      5. Poll status until Completed
+      6. Get presigned download URL for output JSON
+      7. Fetch and return transcript
     """
+    import asyncio
+
     if not SARVAM_API_KEY:
         raise HTTPException(status_code=503, detail="SARVAM_API_KEY not configured")
 
     audio_bytes = await audio.read()
     mime        = audio.content_type or "audio/webm"
     filename    = audio.filename or "recording.webm"
+    print(f"[TRANSCRIBE] {len(audio_bytes)} bytes  mime={mime}")
 
-    print(f"[TRANSCRIBE] {len(audio_bytes)} bytes, mime={mime}")
+    sarvam_headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.sarvam.ai/speech-to-text",
-                headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": (filename, audio_bytes, mime)},
-                data={
-                    "model":         "saarika:v2.5",
-                    "language_code": "unknown",   # auto-detect: handles en-IN + ta-IN code-switching
+        # ── Step 1: Initiate job ──────────────────────────────────────────────
+        async with httpx.AsyncClient(timeout=30) as client:
+            init_resp = await client.post(
+                _SARVAM_BATCH_BASE,
+                headers=sarvam_headers,
+                json={
+                    "job_parameters": {
+                        "language_code":    "unknown",   # auto-detect; handles en-IN + ta-IN
+                        "model":            "saaras:v3",
+                        "mode":             "transcribe",
+                        "with_timestamps":  False,
+                        "with_diarization": False,
+                    }
                 },
             )
-        resp.raise_for_status()
-        data       = resp.json()
-        transcript = data.get("transcript", "")
-        lang_code  = data.get("language_code", "")
-        print(f"[TRANSCRIBE] detected={lang_code} → {len(transcript)} chars")
+        _raise_sarvam(init_resp, "initiate")
+        init_data = init_resp.json()
+        job_id    = init_data["job_id"]
+        print(f"[TRANSCRIBE] job_id={job_id}")
+
+        # ── Step 2: Get presigned upload URL ─────────────────────────────────
+        async with httpx.AsyncClient(timeout=30) as client:
+            up_resp = await client.post(
+                f"{_SARVAM_BATCH_BASE}/upload-files",
+                headers=sarvam_headers,
+                json={"job_id": job_id, "files": [filename]},
+            )
+        _raise_sarvam(up_resp, "upload-url")
+        up_data      = up_resp.json()
+        print(f"[TRANSCRIBE] upload-files response keys: {list(up_data.keys())}")
+        # API returns list under "files" or direct "upload_urls" — handle both
+        file_entries = up_data.get("files") or up_data.get("upload_urls") or []
+        if not file_entries:
+            raise HTTPException(status_code=502, detail=f"Unexpected upload-files response: {up_data}")
+        presigned_upload = file_entries[0].get("url") or file_entries[0].get("upload_url") or file_entries[0]
+        if not isinstance(presigned_upload, str):
+            raise HTTPException(status_code=502, detail=f"Could not extract presigned URL from: {file_entries[0]}")
+
+        # ── Step 3: PUT audio to presigned URL (no auth header — it's cloud storage) ──
+        async with httpx.AsyncClient(timeout=120) as client:
+            put_resp = await client.put(
+                presigned_upload,
+                content=audio_bytes,
+                headers={"Content-Type": mime},
+            )
+        if put_resp.status_code not in (200, 201, 204):
+            raise HTTPException(status_code=502, detail=f"Audio upload failed: {put_resp.status_code}")
+        print(f"[TRANSCRIBE] audio uploaded → {put_resp.status_code}")
+
+        # ── Step 4: Start job ─────────────────────────────────────────────────
+        async with httpx.AsyncClient(timeout=30) as client:
+            start_resp = await client.post(
+                f"{_SARVAM_BATCH_BASE}/{job_id}/start",
+                headers=sarvam_headers,
+                json={},
+            )
+        _raise_sarvam(start_resp, "start")
+        print(f"[TRANSCRIBE] job started")
+
+        # ── Step 5: Poll until Completed ──────────────────────────────────────
+        status_data: dict = {}
+        for poll_n in range(_MAX_POLLS):
+            await asyncio.sleep(_POLL_INTERVAL_S)
+            async with httpx.AsyncClient(timeout=30) as client:
+                stat_resp = await client.get(
+                    f"{_SARVAM_BATCH_BASE}/{job_id}/status",
+                    headers={"api-subscription-key": SARVAM_API_KEY},
+                )
+            _raise_sarvam(stat_resp, "status")
+            status_data = stat_resp.json()
+            job_state   = status_data.get("job_state", "")
+            print(f"[TRANSCRIBE] poll#{poll_n+1} state={job_state}")
+            if job_state in ("Completed", "PartiallyCompleted"):
+                break
+            if job_state == "Failed":
+                raise HTTPException(status_code=500, detail="Sarvam batch job failed")
+        else:
+            raise HTTPException(status_code=504, detail="Transcription timed out after 4 minutes")
+
+        # ── Step 6: Get download presigned URL ────────────────────────────────
+        job_details  = status_data.get("job_details") or []
+        output_files = []
+        for detail in job_details:
+            for out in (detail.get("outputs") or []):
+                fname = out.get("file_name") or out.get("name")
+                if fname:
+                    output_files.append(fname)
+        if not output_files:
+            raise HTTPException(status_code=502, detail=f"No output files in job_details: {status_data}")
+        print(f"[TRANSCRIBE] output files: {output_files}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            dl_resp = await client.post(
+                f"{_SARVAM_BATCH_BASE}/download-files",
+                headers=sarvam_headers,
+                json={"job_id": job_id, "files": output_files},
+            )
+        _raise_sarvam(dl_resp, "download-url")
+        dl_data      = dl_resp.json()
+        dl_entries   = dl_data.get("files") or dl_data.get("download_urls") or []
+        if not dl_entries:
+            raise HTTPException(status_code=502, detail=f"Unexpected download-files response: {dl_data}")
+        presigned_download = dl_entries[0].get("url") or dl_entries[0].get("download_url") or dl_entries[0]
+        if not isinstance(presigned_download, str):
+            raise HTTPException(status_code=502, detail=f"Could not extract download URL from: {dl_entries[0]}")
+
+        # ── Step 7: Fetch transcript JSON ─────────────────────────────────────
+        async with httpx.AsyncClient(timeout=30) as client:
+            result_resp = await client.get(presigned_download)
+        if not result_resp.is_success:
+            raise HTTPException(status_code=502, detail=f"Download failed: {result_resp.status_code}")
+
+        result     = result_resp.json()
+        print(f"[TRANSCRIBE] result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+        # Sarvam output JSON may use "transcript", "text", or nested structure
+        transcript = (
+            result.get("transcript")
+            or result.get("text")
+            or result.get("transcription")
+            or _extract_nested_transcript(result)
+            or ""
+        )
+        lang_code = result.get("language_code", "")
+        print(f"[TRANSCRIBE] done  lang={lang_code}  chars={len(transcript)}")
         return {"transcript": transcript, "language_code": lang_code}
+
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
-        print(f"[TRANSCRIBE ERROR] Sarvam {e.response.status_code}: {e.response.text}")
-        raise HTTPException(status_code=502, detail=f"Sarvam STT error: {e.response.text}")
+        print(f"[TRANSCRIBE ERROR] HTTP {e.response.status_code}: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Sarvam error: {e.response.text}")
     except Exception as e:
         print(f"[TRANSCRIBE ERROR] {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
+
+
+def _raise_sarvam(resp: httpx.Response, step: str) -> None:
+    if not resp.is_success:
+        print(f"[TRANSCRIBE] {step} failed {resp.status_code}: {resp.text}")
+        raise httpx.HTTPStatusError(f"{step} failed", request=resp.request, response=resp)
+
+
+def _extract_nested_transcript(data: dict) -> str:
+    """Fallback: walk nested dicts/lists to find a non-empty 'transcript' or 'text' value."""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("transcript", "text", "transcription"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    # try one level deeper (e.g. {"result": {"transcript": "..."}})
+    for v in data.values():
+        if isinstance(v, dict):
+            result = _extract_nested_transcript(v)
+            if result:
+                return result
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    result = _extract_nested_transcript(item)
+                    if result:
+                        return result
+    return ""
 
 
 # ─── EXTRACT ─────────────────────────────────────────────────────────────────
