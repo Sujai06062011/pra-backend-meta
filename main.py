@@ -869,6 +869,13 @@ async def meta_webhook_inbound(request: Request):
                         print(f"[STALE] rxpat list ignored, state={current_state}")
                     else:
                         await handle_inbound_message(from_number, list_id, clinic_number)
+                elif list_id.startswith("labpt_"):
+                    # lab report patient selection
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_lab_patient_select":
+                        print(f"[STALE] labpt list ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, list_id, clinic_number)
                 else:
                     list_id_to_text = {
                         "menu_book_appointment":  "1",
@@ -899,6 +906,12 @@ async def meta_webhook_inbound(request: Request):
                     current_state, _ = get_conversation_state(from_number)
                     if current_state != "awaiting_prescription_patient_select":
                         print(f"[STALE] rxpat button ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, button_id, clinic_number)
+                elif button_id.startswith("labpt_"):
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_lab_patient_select":
+                        print(f"[STALE] labpt button ignored, state={current_state}")
                     else:
                         await handle_inbound_message(from_number, button_id, clinic_number)
                 else:

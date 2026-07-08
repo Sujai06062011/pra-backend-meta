@@ -35,7 +35,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
     "awaiting_prescription_patient_select",
-    "awaiting_lab_doc_confirm",
+    "awaiting_lab_doc_confirm", "awaiting_lab_patient_select",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -807,6 +807,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "prescription_patient_selected"
     elif current_state == "awaiting_lab_doc_confirm":
         intent = "lab_doc_confirm_reply"
+    elif current_state == "awaiting_lab_patient_select":
+        intent = "lab_patient_selected"
     elif current_state == "awaiting_lab_doc_category":
         intent = "lab_doc_category_reply"
     elif current_state == "awaiting_doctor_select":
@@ -2215,35 +2217,131 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         mime     = temp_data.get("mime", "application/octet-stream")
 
         if t in ("lab_yes", "yes", "y", "yeah", "lab report", "it's my lab report"):
-            # Ingest immediately — no need to ask category
+            # Get all linked patients — prefer those with pending lab orders
+            all_pts = get_all_linked_patients(from_number)
+            if not all_pts:
+                reply = "We couldn't find your record. Please register first." + MENU_HINT
+                new_state = "idle"
+            elif len(all_pts) == 1:
+                # Only one patient — skip picker, ingest directly
+                _pid = all_pts[0]["id"]
+                try:
+                    from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
+                    _result = await receive_whatsapp_report(WhatsAppReportBody(
+                        mobile=from_number, document_url=doc_url,
+                        document_name=doc_name, mime_type=mime, patient_id=_pid,
+                    ))
+                except Exception as _le:
+                    print(f"[LAB WA] ingest error: {_le}")
+                    _result = {"ok": False}
+                reply = (
+                    f"✅ Report received for *{all_pts[0]['name']}* and linked to their record.\n\n"
+                    f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
+                ) if _result.get("ok") else (
+                    "Thank you! Your report has been noted. "
+                    f"{doctor_name} will follow up shortly." + MENU_HINT
+                )
+                new_state = "idle"
+            else:
+                # Multiple patients — check who has pending orders first
+                pt_ids = [p["id"] for p in all_pts]
+                ord_res = _supa.table("lab_orders") \
+                    .select("patient_id") \
+                    .in_("patient_id", pt_ids) \
+                    .in_("status", ["Ordered", "Collected", "Processing"]) \
+                    .execute()
+                pending_ids = {r["patient_id"] for r in (ord_res.data or [])}
+
+                # Patients with pending orders first, then rest
+                ordered_pts = [p for p in all_pts if p["id"] in pending_ids] + \
+                              [p for p in all_pts if p["id"] not in pending_ids]
+                ordered_pts = ordered_pts[:10]  # WhatsApp list max
+
+                if len(ordered_pts) <= 3:
+                    buttons = [
+                        {"id": f"labpt_{p['id']}", "title": p["name"][:20]}
+                        for p in ordered_pts
+                    ]
+                    await send_meta_buttons(
+                        to_number=from_number,
+                        body_text="Who is this report for?",
+                        buttons=buttons,
+                        footer_text="Select the family member",
+                    )
+                else:
+                    rows = [
+                        {
+                            "id": f"labpt_{p['id']}",
+                            "title": p["name"][:24],
+                            "description": (
+                                ("⏳ Pending order" if p["id"] in pending_ids else "") +
+                                (f" · {p['age']} yrs" if p.get("age") else "")
+                            ).strip(" · "),
+                        }
+                        for p in ordered_pts
+                    ]
+                    await send_meta_list(
+                        to_number=from_number,
+                        body_text="Who is this report for?\n\n⏳ = has a pending test order",
+                        button_label="Select patient",
+                        sections=[{"title": "Family Members", "rows": rows}],
+                    )
+                new_state = "awaiting_lab_patient_select"
+                new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
+        else:
+            reply = "No problem! How else can I help you?" + MENU_HINT
+            new_state = "idle"
+
+    elif intent == "lab_patient_selected":
+        doc_url  = temp_data.get("doc_url", "")
+        doc_name = temp_data.get("doc_name", "document")
+        mime     = temp_data.get("mime", "application/octet-stream")
+
+        # Resolve patient_id from labpt_ button/list or numbered reply
+        selected_pid = None
+        selected_name = None
+        if t.startswith("labpt_"):
+            selected_pid = t[len("labpt_"):]
+        else:
+            # Numbered fallback
+            all_pts = get_all_linked_patients(from_number)
+            try:
+                idx = int(t.strip()) - 1
+                if 0 <= idx < len(all_pts):
+                    selected_pid  = all_pts[idx]["id"]
+                    selected_name = all_pts[idx]["name"]
+            except ValueError:
+                pass
+
+        if not selected_pid:
+            reply = "Sorry, I didn't understand that. Please tap one of the options." + MENU_HINT
+            new_state = "idle"
+        else:
+            # Get name if not already set
+            if not selected_name:
+                pr = _supa.table("patients").select("name").eq("id", selected_pid).limit(1).execute()
+                selected_name = pr.data[0]["name"] if pr.data else "the patient"
+
             try:
                 from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
-                _body = WhatsAppReportBody(
+                _result = await receive_whatsapp_report(WhatsAppReportBody(
                     mobile=from_number,
                     document_url=doc_url,
                     document_name=doc_name,
                     mime_type=mime,
-                    test_category=None,
-                )
-                _result = await receive_whatsapp_report(_body)
+                    patient_id=selected_pid,
+                ))
             except Exception as _le:
-                print(f"[LAB WA] report ingest error: {_le}")
+                print(f"[LAB WA] ingest error: {_le}")
                 _result = {"ok": False}
 
-            if _result.get("ok"):
-                reply = (
-                    f"✅ Your report has been received and linked to your record.\n\n"
-                    f"{doctor_name} will review it shortly. "
-                    f"You'll receive a summary once reviewed. 🏥" + MENU_HINT
-                )
-            else:
-                reply = (
-                    "Thank you! Your report has been noted. "
-                    f"{doctor_name} will follow up with you shortly." + MENU_HINT
-                )
-            new_state = "idle"
-        else:
-            reply = "No problem! How else can I help you?" + MENU_HINT
+            reply = (
+                f"✅ Report received for *{selected_name}* and linked to their record.\n\n"
+                f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
+            ) if _result.get("ok") else (
+                f"Thank you! The report for {selected_name} has been noted. "
+                f"{doctor_name} will follow up shortly." + MENU_HINT
+            )
             new_state = "idle"
 
     elif intent == "lab_doc_category_reply":

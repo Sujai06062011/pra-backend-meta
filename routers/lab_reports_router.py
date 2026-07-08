@@ -657,21 +657,27 @@ class WhatsAppReportBody(BaseModel):
     document_name: str
     mime_type: str
     test_category: Optional[str] = None
+    patient_id: Optional[str] = None   # explicit override — set when patient selected from list
 
 
 @router.post("/whatsapp-report")
 async def receive_whatsapp_report(body: WhatsAppReportBody):
     """Called from whatsapp_handler when patient sends a document."""
-    # Find patient
-    clean_mobile = body.mobile.lstrip("91") if body.mobile.startswith("91") else body.mobile
-    with_prefix  = f"91{clean_mobile}"
-
-    pat_res = supabase.table("patients") \
-        .select("id, name, doctor_id") \
-        .or_(f"mobile.eq.{body.mobile},mobile.eq.{clean_mobile},"
-             f"mobile.eq.{with_prefix},whatsapp_number.eq.{body.mobile},"
-             f"whatsapp_number.eq.{with_prefix}") \
-        .limit(1).execute()
+    # Use explicit patient_id if provided (family member selection flow)
+    if body.patient_id:
+        pat_res = supabase.table("patients") \
+            .select("id, name, doctor_id") \
+            .eq("id", body.patient_id) \
+            .limit(1).execute()
+    else:
+        clean_mobile = body.mobile.lstrip("91") if body.mobile.startswith("91") else body.mobile
+        with_prefix  = f"91{clean_mobile}"
+        pat_res = supabase.table("patients") \
+            .select("id, name, doctor_id") \
+            .or_(f"mobile.eq.{body.mobile},mobile.eq.{clean_mobile},"
+                 f"mobile.eq.{with_prefix},whatsapp_number.eq.{body.mobile},"
+                 f"whatsapp_number.eq.{with_prefix}") \
+            .limit(1).execute()
 
     if not pat_res.data:
         return {"ok": False, "reason": "patient_not_found"}
