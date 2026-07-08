@@ -2745,13 +2745,18 @@ async def update_prescription(prescription_id: str, request: Request, background
                 from routers.prescription_ai_router import build_pdf_bytes as _build_pdf
                 import uuid as _uuid, traceback as _tb2
                 print(f"[PDF SEND] building PDF for updated prescription {prescription_id}")
-                _vis_id = body.get("visit_id") or supabase.table("prescriptions").select("visit_id").eq("id", prescription_id).limit(1).execute().data[0].get("visit_id")
+                _vis_id = body.get("visit_id") or None
                 _vis2 = {}
                 if _vis_id:
                     _vis2_res = supabase.table("visits").select("chief_complaint, diagnosis, notes, past_history, allergies, lab_findings").eq("id", _vis_id).limit(1).execute()
                     _vis2 = (_vis2_res.data or [{}])[0]
-                _doc2_q = supabase.table("doctors").select("name, clinic_name").eq("id", body.get("doctor_id", "")).limit(1).execute()
-                _doc2 = (_doc2_q.data or [{}])[0]
+                _pres2_r = supabase.table("prescriptions").select("doctor_id, visit_id").eq("id", prescription_id).limit(1).execute()
+                _pres2   = (_pres2_r.data or [{}])[0]
+                _doc2_id = _pres2.get("doctor_id") or ""
+                _doc2_q  = supabase.table("doctors").select("name, clinic_name").eq("id", _doc2_id).limit(1).execute() if _doc2_id else type("R", (), {"data": []})()
+                _doc2    = (_doc2_q.data or [{}])[0]
+                if not _vis_id:
+                    _vis_id = _pres2.get("visit_id")
                 _pdf2_data = {
                     "clinic_name":          _doc2.get("clinic_name") or "",
                     "doctor_name":          _doc2.get("name") or "",
