@@ -1,7 +1,7 @@
 """
 prescription_ai_router.py — AI-powered prescription endpoints.
 
-  POST /prescriptions/transcribe   — audio file → transcript (Groq Whisper)
+  POST /prescriptions/transcribe   — audio file → transcript (Sarvam saarika:v2.5)
   POST /prescriptions/extract      — transcript → structured JSON (Claude Haiku)
   POST /prescriptions/generate-pdf — prescription data → PDF bytes (ReportLab)
 """
@@ -16,7 +16,7 @@ from fastapi.responses import Response
 
 router = APIRouter()
 
-GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
+SARVAM_API_KEY    = os.getenv("SARVAM_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 IST               = pytz.timezone("Asia/Kolkata")
 
@@ -25,25 +25,40 @@ IST               = pytz.timezone("Asia/Kolkata")
 
 @router.post("/prescriptions/transcribe")
 async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
-    """Receive audio blob from browser MediaRecorder, return plain transcript."""
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
+    """
+    Receive audio blob from browser MediaRecorder, transcribe via Sarvam
+    saarika:v2.5 with language_code=unknown (auto-detects Tamil/English
+    code-switching and Indian pharmaceutical names).
+    """
+    if not SARVAM_API_KEY:
+        raise HTTPException(status_code=503, detail="SARVAM_API_KEY not configured")
 
     audio_bytes = await audio.read()
-    mime = audio.content_type or "audio/webm"
+    mime        = audio.content_type or "audio/webm"
+    filename    = audio.filename or "recording.webm"
+
+    print(f"[TRANSCRIBE] {len(audio_bytes)} bytes, mime={mime}")
 
     try:
-        import groq as _groq
-        client = _groq.Groq(api_key=GROQ_API_KEY)
-        result = client.audio.transcriptions.create(
-            file=(audio.filename or "recording.webm", audio_bytes, mime),
-            model="whisper-large-v3",
-            language="en",
-            response_format="text",
-        )
-        transcript = result if isinstance(result, str) else getattr(result, "text", str(result))
-        print(f"[TRANSCRIBE] {len(audio_bytes)} bytes → {len(transcript)} chars")
-        return {"transcript": transcript}
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.sarvam.ai/speech-to-text",
+                headers={"api-subscription-key": SARVAM_API_KEY},
+                files={"file": (filename, audio_bytes, mime)},
+                data={
+                    "model":         "saarika:v2.5",
+                    "language_code": "unknown",   # auto-detect: handles en-IN + ta-IN code-switching
+                },
+            )
+        resp.raise_for_status()
+        data       = resp.json()
+        transcript = data.get("transcript", "")
+        lang_code  = data.get("language_code", "")
+        print(f"[TRANSCRIBE] detected={lang_code} → {len(transcript)} chars")
+        return {"transcript": transcript, "language_code": lang_code}
+    except httpx.HTTPStatusError as e:
+        print(f"[TRANSCRIBE ERROR] Sarvam {e.response.status_code}: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Sarvam STT error: {e.response.text}")
     except Exception as e:
         print(f"[TRANSCRIBE ERROR] {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
