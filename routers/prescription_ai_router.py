@@ -162,13 +162,19 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
                 json={"job_id": job_id, "files": output_files},
             )
         _raise_sarvam(dl_resp, "download-url")
-        dl_data      = dl_resp.json()
-        dl_entries   = dl_data.get("files") or dl_data.get("download_urls") or []
-        if not dl_entries:
-            raise HTTPException(status_code=502, detail=f"Unexpected download-files response: {dl_data}")
-        presigned_download = dl_entries[0].get("url") or dl_entries[0].get("download_url") or dl_entries[0]
+        dl_data = dl_resp.json()
+        print(f"[TRANSCRIBE] download-files keys={list(dl_data.keys())} value={str(dl_data)[:300]}")
+        raw_dl = dl_data.get("download_urls") or dl_data.get("files") or {}
+        if isinstance(raw_dl, dict):
+            first_dl = next(iter(raw_dl.values()), None)
+            presigned_download = first_dl.get("file_url") or first_dl.get("url") if isinstance(first_dl, dict) else first_dl
+        elif isinstance(raw_dl, list) and raw_dl:
+            entry = raw_dl[0]
+            presigned_download = entry if isinstance(entry, str) else (entry.get("file_url") or entry.get("url"))
+        else:
+            presigned_download = None
         if not isinstance(presigned_download, str):
-            raise HTTPException(status_code=502, detail=f"Could not extract download URL from: {dl_entries[0]}")
+            raise HTTPException(status_code=502, detail=f"Could not extract download URL: {dl_data}")
 
         # ── Step 7: Fetch transcript JSON ─────────────────────────────────────
         async with httpx.AsyncClient(timeout=30) as client:
