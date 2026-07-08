@@ -390,6 +390,7 @@ def build_pdf_bytes(data: dict) -> bytes:
     dietary        = data.get("dietary_instructions", "")
     precautions    = data.get("precautions",     "")
     notes          = data.get("notes",           "")
+    followup_date  = data.get("followup_date",   "")
     vitals         = data.get("vitals",          {})
 
     buf = io.BytesIO()
@@ -573,6 +574,21 @@ def build_pdf_bytes(data: dict) -> bytes:
         for line in advice_parts:
             story.append(Paragraph(line, body))
             story.append(Spacer(1, 1*mm))
+
+    # ── Follow-up ─────────────────────────────────────────────────────────────
+    if followup_date:
+        try:
+            fu_fmt = datetime.strptime(followup_date, "%Y-%m-%d").strftime("%d %b %Y")
+        except Exception:
+            fu_fmt = followup_date
+        fu_style = ParagraphStyle("fu", fontSize=9, fontName="Helvetica",
+                                  textColor=HexColor("#166534"),
+                                  backColor=HexColor("#f0fdf4"),
+                                  borderPad=4, borderWidth=0.5,
+                                  borderColor=HexColor("#bbf7d0"),
+                                  borderRadius=4, leading=14)
+        story.append(Paragraph(f"<b>Follow-up Review:</b>  {fu_fmt}", fu_style))
+        story.append(Spacer(1, 4*mm))
 
     # ── Signature ────────────────────────────────────────────────────────────
     story.append(Spacer(1, 8*mm))

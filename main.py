@@ -2601,6 +2601,7 @@ async def update_prescription(prescription_id: str, request: Request, background
         "dietary_instructions": body.get("dietary_instructions", ""),
         "precautions":          body.get("precautions", ""),
         "general_notes":        body.get("notes", ""),
+        "followup_date":        body.get("followup_date") or None,
     }).eq("id", prescription_id).execute()
 
     # 2. Update visit if visit_id present
@@ -2734,7 +2735,17 @@ async def update_prescription(prescription_id: str, request: Request, background
             )
             if dietary:     msg += f"\n\n🥗 Diet: {dietary}"
             if precautions: msg += f"\n⚠️ Precautions: {precautions}"
-            msg += f"\n\nFollow-up in 3 days if not improving.\nReply MENU for any help."
+            _fu_date_str = body.get("followup_date") or ""
+            if _fu_date_str:
+                import datetime as _dt2
+                try:
+                    _fu_fmt = _dt2.date.fromisoformat(_fu_date_str).strftime("%d %b %Y")
+                    msg += f"\n\n📅 Follow-up Review: {_fu_fmt}"
+                except Exception:
+                    msg += f"\n\n📅 Follow-up Review: {_fu_date_str}"
+            else:
+                msg += f"\n\nFollow-up in 3 days if not improving."
+            msg += f"\nReply MENU for any help."
 
         if mobile:
             await send_meta_text(mobile, msg)
@@ -2773,6 +2784,7 @@ async def update_prescription(prescription_id: str, request: Request, background
                     "medicines":            medicines,
                     "dietary_instructions": dietary,
                     "precautions":          precautions,
+                    "followup_date":        body.get("followup_date") or "",
                     "notes":                body.get("notes") or "",
                     "vitals":               {},
                 }
@@ -3347,6 +3359,7 @@ async def create_prescription_v2(request: Request, background_tasks: BackgroundT
         }).execute()
         visit_id = visit_res.data[0]["id"] if visit_res.data else None
 
+    followup_date = body.get("followup_date") or None
     pres_data = {
         "doctor_id":            doctor_id_req,
         "patient_id":           patient_id,
@@ -3355,6 +3368,7 @@ async def create_prescription_v2(request: Request, background_tasks: BackgroundT
         "dietary_instructions": dietary,
         "precautions":          precautions,
         "general_notes":        notes,
+        "followup_date":        followup_date,
         "whatsapp_sent":        False,
         "created_at":           now_ist.isoformat(),
     }
@@ -3493,7 +3507,17 @@ async def send_prescription_whatsapp(prescription_id: str):
                 msg += f"\n\n🥗 உணவு: {dietary}"
             if precautions_text:
                 msg += f"\n⚠️ எச்சரிக்கை: {precautions_text}"
-            msg += f"\n\nFollow-up: 7 நாட்களில் வரவும்.\nகேள்விகளுக்கு MENU என்று reply பண்ணுங்கள்."
+            _fu_pres = pres.get("followup_date") or ""
+            if _fu_pres:
+                try:
+                    import datetime as _dtt
+                    _fu_fmt2 = _dtt.date.fromisoformat(_fu_pres).strftime("%d %b %Y")
+                    msg += f"\n\n📅 Follow-up: {_fu_fmt2} அன்று வரவும்."
+                except Exception:
+                    msg += f"\n\n📅 Follow-up: {_fu_pres} அன்று வரவும்."
+            else:
+                msg += f"\n\nFollow-up: 7 நாட்களில் வரவும்."
+            msg += f"\nகேள்விகளுக்கு MENU என்று reply பண்ணுங்கள்."
         else:
             msg = (
                 f"💊 *Your Prescription*\n"
@@ -3506,7 +3530,17 @@ async def send_prescription_whatsapp(prescription_id: str):
                 msg += f"\n\n🥗 Diet: {dietary}"
             if precautions_text:
                 msg += f"\n⚠️ Precautions: {precautions_text}"
-            msg += f"\n\nFollow-up in 7 days.\nReply MENU for any help."
+            _fu_pres = pres.get("followup_date") or ""
+            if _fu_pres:
+                try:
+                    import datetime as _dtt
+                    _fu_fmt2 = _dtt.date.fromisoformat(_fu_pres).strftime("%d %b %Y")
+                    msg += f"\n\n📅 Follow-up Review: {_fu_fmt2}"
+                except Exception:
+                    msg += f"\n\n📅 Follow-up Review: {_fu_pres}"
+            else:
+                msg += f"\n\nFollow-up in 7 days."
+            msg += f"\nReply MENU for any help."
 
         await send_meta_text(mobile, msg)
 
@@ -3540,6 +3574,7 @@ async def send_prescription_whatsapp(prescription_id: str):
                 "medicines":             medicines,
                 "dietary_instructions":  pres.get("dietary_instructions") or "",
                 "precautions":           pres.get("precautions") or "",
+                "followup_date":         pres.get("followup_date") or "",
                 "notes":                 _vis.get("notes") or "",
                 "vitals":                {},
             }
