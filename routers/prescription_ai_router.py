@@ -86,13 +86,18 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
         _raise_sarvam(up_resp, "upload-url")
         up_data      = up_resp.json()
         print(f"[TRANSCRIBE] upload-files response keys: {list(up_data.keys())}")
-        # API returns list under "files" or direct "upload_urls" — handle both
-        file_entries = up_data.get("files") or up_data.get("upload_urls") or []
-        if not file_entries:
-            raise HTTPException(status_code=502, detail=f"Unexpected upload-files response: {up_data}")
-        presigned_upload = file_entries[0].get("url") or file_entries[0].get("upload_url") or file_entries[0]
+        # API returns upload_urls as dict {filename: url} or list [{url:...}]
+        raw_urls = up_data.get("upload_urls") or up_data.get("files") or {}
+        if isinstance(raw_urls, dict):
+            # {"recording.webm": "https://presigned-url..."}
+            presigned_upload = next(iter(raw_urls.values()), None)
+        elif isinstance(raw_urls, list) and raw_urls:
+            entry = raw_urls[0]
+            presigned_upload = entry if isinstance(entry, str) else (entry.get("url") or entry.get("upload_url"))
+        else:
+            presigned_upload = None
         if not isinstance(presigned_upload, str):
-            raise HTTPException(status_code=502, detail=f"Could not extract presigned URL from: {file_entries[0]}")
+            raise HTTPException(status_code=502, detail=f"Could not extract presigned URL from upload-files: {up_data}")
 
         # ── Step 3: PUT audio to presigned URL (no auth header — it's cloud storage) ──
         async with httpx.AsyncClient(timeout=120) as client:
