@@ -54,8 +54,12 @@ def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
         return False  # Active state machine flow — never interrupt
     if current_state not in ("idle", "agent"):
         return False  # Unknown state — let state machine handle it
-    if text.lower().strip() in _SM_KEYWORDS:
+    t_lower = text.lower().strip()
+    if t_lower in _SM_KEYWORDS:
         return False  # Menu shortcuts → state machine
+    # Prescription requests (including voice notes with full sentences)
+    if any(k in t_lower for k in ("prescription", "my report", "my medicine")):
+        return False
     # New patients with simple digit/keyword → state machine registration flow
     if not is_existing and text.lower().strip() in {"1", "2", "3", "4", "5", "6", "7",
                                                      "hi", "hello", "hey", "start"}:
