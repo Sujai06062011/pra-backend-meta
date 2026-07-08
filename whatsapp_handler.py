@@ -2243,21 +2243,17 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         }
         category = next((v for k, v in cat_map.items() if k in t), "Other")
 
-        # Post to /api/lab/whatsapp-report
-        import httpx as _httpx
+        # Call lab ingest directly (same process — avoid localhost HTTP call)
         try:
-            async with _httpx.AsyncClient(timeout=60) as _c:
-                _r = await _c.post(
-                    "http://localhost:8000/api/lab/whatsapp-report",
-                    json={
-                        "mobile":        from_number,
-                        "document_url":  doc_url,
-                        "document_name": doc_name,
-                        "mime_type":     mime,
-                        "test_category": category,
-                    },
-                )
-                _result = _r.json()
+            from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
+            _body = WhatsAppReportBody(
+                mobile=from_number,
+                document_url=doc_url,
+                document_name=doc_name,
+                mime_type=mime,
+                test_category=category,
+            )
+            _result = await receive_whatsapp_report(_body)
         except Exception as _le:
             print(f"[LAB WA] report ingest error: {_le}")
             _result = {"ok": False}
