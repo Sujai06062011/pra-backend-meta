@@ -90,7 +90,8 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
         raw_urls = up_data.get("upload_urls") or up_data.get("files") or {}
         print(f"[TRANSCRIBE] raw_urls type={type(raw_urls).__name__} value={str(raw_urls)[:300]}")
         if isinstance(raw_urls, dict):
-            presigned_upload = next(iter(raw_urls.values()), None)
+            first = next(iter(raw_urls.values()), None)
+            presigned_upload = first.get("file_url") or first.get("url") or first if isinstance(first, dict) else first
         elif isinstance(raw_urls, list) and raw_urls:
             entry = raw_urls[0]
             presigned_upload = entry if isinstance(entry, str) else (entry.get("url") or entry.get("upload_url"))
