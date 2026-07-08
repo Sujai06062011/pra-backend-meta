@@ -3462,6 +3462,9 @@ async def send_prescription_whatsapp(prescription_id: str):
         try:
             from routers.prescription_ai_router import build_pdf_bytes
             import uuid as _uuid
+            import traceback as _tb
+
+            print(f"[PDF SEND] building PDF for prescription {prescription_id}")
 
             # Build PDF data dict
             _vis_res = db.table("visits").select("chief_complaint, diagnosis, notes, past_history, allergies, lab_findings").eq("id", pres.get("visit_id", "")).limit(1).execute()
@@ -3489,25 +3492,30 @@ async def send_prescription_whatsapp(prescription_id: str):
                 "vitals":                {},
             }
             _pdf_bytes = build_pdf_bytes(_pdf_data)
+            print(f"[PDF SEND] PDF built — {len(_pdf_bytes)} bytes")
 
             # Upload to Supabase Storage
             _bucket    = "prescription-pdfs"
             _filename  = f"prescriptions/{_uuid.uuid4()}.pdf"
-            supabase.storage.from_(_bucket).upload(
+            _up_res = supabase.storage.from_(_bucket).upload(
                 _filename, _pdf_bytes,
                 {"content-type": "application/pdf", "upsert": "true"},
             )
+            print(f"[PDF SEND] upload result: {_up_res}")
             _pdf_url = supabase.storage.from_(_bucket).get_public_url(_filename)
+            print(f"[PDF SEND] public URL: {_pdf_url}")
 
             pat_fn = name.replace(" ", "-")
-            await send_meta_document(
+            _doc_resp = await send_meta_document(
                 mobile,
                 _pdf_url,
                 caption=f"Prescription from Dr. {_doc_d.get('name', 'Kumar')}",
                 filename=f"Prescription-{pat_fn}-{pdate_fmt.replace(' ', '')}.pdf",
             )
+            print(f"[PDF SEND] Meta document response: {_doc_resp}")
         except Exception as _pdf_err:
-            print(f"[PDF SEND] Skipped — {_pdf_err}")
+            print(f"[PDF SEND] FAILED — {_pdf_err}")
+            print(_tb.format_exc())
 
         db.table("prescriptions").update({"whatsapp_sent": True}).eq("id", prescription_id).execute()
 
