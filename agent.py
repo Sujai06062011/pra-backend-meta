@@ -220,6 +220,12 @@ def _tool_get_patient(mobile: str) -> dict:
         .execute()
     )
     patients = result.data or []
+    if patients:
+        pat_ids = [p["id"] for p in patients]
+        pres_res = supa.table("prescriptions").select("patient_id").in_("patient_id", pat_ids).execute()
+        has_pres = {r["patient_id"] for r in (pres_res.data or [])}
+        for p in patients:
+            p["has_prescription"] = p["id"] in has_pres
     return {"found": bool(patients), "patients": patients}
 
 
@@ -768,10 +774,12 @@ Reply CANCEL to cancel. Reply MENU for help.
 11. Never make up information. If a tool fails, tell patient honestly and offer to help via another way.
 12. If patient sends "MENU", "BYE", or a number 1-6 — do NOT handle it. Return empty string so state machine takes over.
 13. If patient asks for a prescription (any phrasing — "share prescription", "latest prescription", "my medicine list", voice notes, etc.):
-    - Call get_patient(mobile="{mobile}") first to get patient list
-    - If multiple patients, ask which one they mean (use patient names from the list)
-    - Call send_prescription(patient_id=..., mobile="{mobile}") — it sends the PDF directly
-    - After success reply: "✅ Sent your latest prescription for [Name] (Date). Check your WhatsApp messages."
+    - Call get_patient(mobile="{mobile}") first — each patient has a has_prescription field
+    - Filter to ONLY patients where has_prescription=true
+    - If none have prescriptions: reply "No prescriptions found. Please visit the clinic."
+    - If exactly one has a prescription: call send_prescription(patient_id=..., mobile="{mobile}") directly, no need to ask
+    - If multiple have prescriptions: list ONLY those names and ask which one
+    - After send_prescription succeeds reply: "✅ Sent your latest prescription for [Name] ([Date]). Check above 👆"
     - If send_prescription returns success=False, share the reason clearly."""
 
     history.append({"role": "user", "content": text})
