@@ -2661,7 +2661,7 @@ async def update_prescription(prescription_id: str, request: Request, background
     whatsapp_sent = False
     try:
         import datetime as dt, pytz
-        pat_res = supabase.table("patients").select("name, mobile, patient_code, language").eq("id", body.get("patient_id", "")).execute()
+        pat_res = supabase.table("patients").select("name, mobile, patient_code, language, age, gender").eq("id", body.get("patient_id", "")).execute()
         patient = pat_res.data[0] if pat_res.data else {}
         mobile   = patient.get("mobile", "")
         pname    = patient.get("name", "Patient")
@@ -3444,7 +3444,7 @@ async def send_prescription_whatsapp(prescription_id: str):
         if not patient_id:
             raise HTTPException(status_code=400, detail="No patient linked to this prescription")
 
-        pat_res = db.table("patients").select("name, mobile, patient_code, language").eq("id", patient_id).execute()
+        pat_res = db.table("patients").select("name, mobile, patient_code, language, age, gender").eq("id", patient_id).execute()
         if not pat_res.data:
             raise HTTPException(status_code=404, detail="Patient not found")
         pat = pat_res.data[0]
