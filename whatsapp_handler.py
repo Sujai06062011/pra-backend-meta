@@ -55,7 +55,8 @@ def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
     if current_state not in ("idle", "agent"):
         return False  # Unknown state — let state machine handle it
     t_lower = text.lower().strip()
-    if t_lower in _SM_KEYWORDS:
+    # In active agent conversation, don't intercept digits/keywords — agent is waiting for reply
+    if current_state != "agent" and t_lower in _SM_KEYWORDS:
         return False  # Menu shortcuts → state machine
     # New patients with simple digit/keyword → state machine registration flow
     if not is_existing and text.lower().strip() in {"1", "2", "3", "4", "5", "6", "7",
