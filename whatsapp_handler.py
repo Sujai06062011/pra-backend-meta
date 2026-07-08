@@ -35,6 +35,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
     "awaiting_prescription_patient_select",
+    "awaiting_lab_doc_confirm", "awaiting_lab_doc_category",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -801,12 +802,18 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "query_text_provided"
     elif current_state == "awaiting_prescription_patient_select":
         intent = "prescription_patient_selected"
+    elif current_state == "awaiting_lab_doc_confirm":
+        intent = "lab_doc_confirm_reply"
+    elif current_state == "awaiting_lab_doc_category":
+        intent = "lab_doc_category_reply"
     elif current_state == "awaiting_doctor_select":
         intent = "doctor_selected"
     # Legacy family states — redirect to new booking flow
     elif current_state in ("awaiting_family_choice", "awaiting_family_name",
                            "awaiting_family_dob", "awaiting_family_gender"):
         intent = "book"
+    elif text.startswith("__DOCUMENT__::"):
+        intent = "incoming_document"
     elif media_url:
         intent = "media"
     elif t == "1" or any(k in t for k in ["book", "appointment"]):
@@ -2171,6 +2178,102 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                         "Please ask your doctor to resend it via WhatsApp to get the PDF." + MENU_HINT
                     )
                     new_state = "idle"
+
+    # ── INCOMING DOCUMENT (PDF/image from patient) ────────────
+    elif intent == "incoming_document":
+        # text = "__DOCUMENT__::<url>::<name>::<mime>"
+        parts = text.split("::", 3)
+        doc_url  = parts[1] if len(parts) > 1 else ""
+        doc_name = parts[2] if len(parts) > 2 else "document"
+        mime     = parts[3] if len(parts) > 3 else "application/octet-stream"
+
+        if is_existing:
+            await send_meta_buttons(
+                to_number=from_number,
+                body_text=f"📎 I received your document *{doc_name}*.\n\nIs this a lab report?",
+                buttons=[
+                    {"id": "lab_yes", "title": "✅ Yes, lab report"},
+                    {"id": "lab_no",  "title": "❌ No, something else"},
+                ],
+                footer_text="Reply MENU for main menu",
+            )
+            new_state = "awaiting_lab_doc_confirm"
+            new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
+        else:
+            reply = (
+                "Thank you for the document. Please register first to link it to your record.\n\n"
+                "Type your name to get started." + MENU_HINT
+            )
+            new_state = "idle"
+
+    elif intent == "lab_doc_confirm_reply":
+        doc_url  = temp_data.get("doc_url", "")
+        doc_name = temp_data.get("doc_name", "document")
+        mime     = temp_data.get("mime", "application/octet-stream")
+
+        if t in ("lab_yes", "yes", "y", "yeah", "lab report", "it's my lab report"):
+            await send_meta_buttons(
+                to_number=from_number,
+                body_text="What type of test is this?",
+                buttons=[
+                    {"id": "labcat_blood",    "title": "🩸 Blood Test"},
+                    {"id": "labcat_diabetes", "title": "🍬 Diabetes/Sugar"},
+                    {"id": "labcat_thyroid",  "title": "🦋 Thyroid"},
+                ],
+                footer_text="Or type: Lipids / Kidney / Urine / Other",
+            )
+            new_state = "awaiting_lab_doc_category"
+            new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
+        else:
+            reply = "No problem! How else can I help you?" + MENU_HINT
+            new_state = "idle"
+
+    elif intent == "lab_doc_category_reply":
+        doc_url  = temp_data.get("doc_url", "")
+        doc_name = temp_data.get("doc_name", "document")
+        mime     = temp_data.get("mime", "application/octet-stream")
+
+        cat_map = {
+            "labcat_blood": "Blood", "labcat_diabetes": "Diabetes",
+            "labcat_thyroid": "Thyroid",
+            "blood": "Blood", "diabetes": "Diabetes", "sugar": "Diabetes",
+            "thyroid": "Thyroid", "lipid": "Lipids", "cholesterol": "Lipids",
+            "kidney": "Kidney", "urine": "Kidney", "liver": "Liver",
+            "other": "Other",
+        }
+        category = next((v for k, v in cat_map.items() if k in t), "Other")
+
+        # Post to /api/lab/whatsapp-report
+        import httpx as _httpx
+        try:
+            async with _httpx.AsyncClient(timeout=60) as _c:
+                _r = await _c.post(
+                    "http://localhost:8000/api/lab/whatsapp-report",
+                    json={
+                        "mobile":        from_number,
+                        "document_url":  doc_url,
+                        "document_name": doc_name,
+                        "mime_type":     mime,
+                        "test_category": category,
+                    },
+                )
+                _result = _r.json()
+        except Exception as _le:
+            print(f"[LAB WA] report ingest error: {_le}")
+            _result = {"ok": False}
+
+        if _result.get("ok"):
+            reply = (
+                f"✅ Your report has been received and linked to your record.\n\n"
+                f"{doctor_name} will review it shortly. "
+                f"You'll receive a summary once reviewed. 🏥" + MENU_HINT
+            )
+        else:
+            reply = (
+                "Thank you! Your report has been noted. "
+                f"{doctor_name} will follow up with you shortly." + MENU_HINT
+            )
+        new_state = "idle"
 
     # ── MEDIA / LAB REPORT ────────────────────────────────────
     elif intent == "media":

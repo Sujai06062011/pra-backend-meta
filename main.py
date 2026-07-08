@@ -7,6 +7,7 @@ from routers.availability import router as availability_router
 from routers.schedule import router as schedule_router
 from routers.clinic_schedule import router as clinic_schedule_router
 from routers.prescription_ai_router import router as prescription_ai_router
+from routers.lab_reports_router import router as lab_reports_router
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 import os
@@ -141,6 +142,7 @@ app.include_router(availability_router)
 app.include_router(schedule_router)
 app.include_router(clinic_schedule_router)
 app.include_router(prescription_ai_router)
+app.include_router(lab_reports_router, prefix="/api/lab", tags=["lab"])
 
 # ── MCP HTTP Transport ────────────────────────────────────────────────────────
 _mcp_server = create_parro_mcp_server(supabase)
@@ -622,6 +624,18 @@ async def download_meta_media(media_id: str) -> bytes:
     return audio_resp.content
 
 
+async def download_meta_media_url(media_id: str) -> dict:
+    """Return {"url": "...", "mime_type": "..."} for a Meta media ID without downloading bytes."""
+    token   = os.getenv("META_ACCESS_TOKEN")
+    version = os.getenv("META_API_VERSION", "v18.0")
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"https://graph.facebook.com/{version}/{media_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return r.json()
+
+
 async def transcribe_audio(audio_bytes: bytes, language_code: str = "ta") -> str:
     """Transcribe audio bytes using Groq Whisper large-v3.
     Result goes through the SAME routing logic as typed text — no special-casing."""
@@ -729,6 +743,32 @@ async def meta_webhook_inbound(request: Request):
                     from_number,
                     "Voice note processing failed. Please type your message instead.",
                 )
+
+        elif msg_type in ("document", "image"):
+            # ── Incoming document/image — possible lab report ──────────────
+            try:
+                media_obj  = msg.get("document") or msg.get("image") or {}
+                media_id   = media_obj.get("id", "")
+                mime_type  = media_obj.get("mime_type", "application/octet-stream")
+                doc_name   = media_obj.get("filename") or media_obj.get("caption") or "document"
+                print(f"[Meta DOC] from={from_number} mime={mime_type} name={doc_name}")
+
+                # Get media URL from Meta
+                media_info = await download_meta_media_url(media_id)
+                doc_url    = media_info.get("url", "") if isinstance(media_info, dict) else ""
+
+                if doc_url:
+                    await handle_inbound_message(
+                        from_number,
+                        f"__DOCUMENT__::{doc_url}::{doc_name}::{mime_type}",
+                        clinic_number,
+                    )
+                else:
+                    await send_meta_text(from_number,
+                        "I received your document but couldn't process it. "
+                        "Please try again or send via the Upload option in our clinic app.")
+            except Exception as _de:
+                print(f"[DOC ERROR] {_de}")
 
         elif msg_type == "interactive":
             interactive_type = msg["interactive"].get("type", "button_reply")
@@ -997,6 +1037,15 @@ async def meta_webhook_inbound(request: Request):
                         else:
                             appointment_id = button_id[len("cancel_"):]
                             await handle_appointment_cancel(from_number, appointment_id)
+
+                    elif button_id in ("lab_yes", "lab_no",
+                                      "labcat_blood", "labcat_diabetes", "labcat_thyroid"):
+                        current_state, _ = get_conversation_state(from_number)
+                        if current_state not in ("awaiting_lab_doc_confirm",
+                                                 "awaiting_lab_doc_category"):
+                            print(f"[STALE] lab button ignored, state={current_state}")
+                        else:
+                            await handle_inbound_message(from_number, button_id, clinic_number)
 
                     elif button_id in ("visit_in_clinic", "visit_online"):
                         current_state, _ = get_conversation_state(from_number)
