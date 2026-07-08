@@ -1,35 +1,9 @@
 -- ============================================================
 -- Lab Reports Migration
 -- Run in Supabase SQL Editor
--- lab_reports table already exists — use ALTER TABLE only
 -- ============================================================
 
--- ── 1. Extend existing lab_reports table ────────────────────
-ALTER TABLE lab_reports
-  ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES lab_orders(id) NULL,
-  ADD COLUMN IF NOT EXISTS test_name VARCHAR(200),
-  ADD COLUMN IF NOT EXISTS test_category VARCHAR(50),
-  ADD COLUMN IF NOT EXISTS lab_name VARCHAR(100),
-  ADD COLUMN IF NOT EXISTS report_date DATE,
-  ADD COLUMN IF NOT EXISTS received_date DATE DEFAULT CURRENT_DATE,
-  ADD COLUMN IF NOT EXISTS report_source VARCHAR(30) DEFAULT 'dashboard_upload',
-  ADD COLUMN IF NOT EXISTS pdf_url TEXT,
-  ADD COLUMN IF NOT EXISTS image_url TEXT,
-  ADD COLUMN IF NOT EXISTS result_summary TEXT,
-  ADD COLUMN IF NOT EXISTS ocr_raw_text TEXT,
-  ADD COLUMN IF NOT EXISTS extracted_values JSONB,
-  ADD COLUMN IF NOT EXISTS doctor_notes TEXT,
-  ADD COLUMN IF NOT EXISTS whatsapp_sent_to_patient BOOLEAN DEFAULT FALSE,
-  ADD COLUMN IF NOT EXISTS external_order_id VARCHAR(100),
-  ADD COLUMN IF NOT EXISTS lab_source VARCHAR(50),
-  ADD COLUMN IF NOT EXISTS raw_api_payload JSONB,
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
-
--- Migrate existing status values to new enum vocabulary
-UPDATE lab_reports SET status = 'Pending Review' WHERE status = 'pending';
-UPDATE lab_reports SET status = 'Reviewed'       WHERE status = 'reviewed';
-
--- ── 2. lab_orders (new) ─────────────────────────────────────
+-- ── 1. lab_orders (must exist before lab_reports FK) ────────
 CREATE TABLE IF NOT EXISTS lab_orders (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   patient_id       UUID REFERENCES patients(id) ON DELETE CASCADE,
@@ -50,7 +24,35 @@ CREATE TABLE IF NOT EXISTS lab_orders (
   created_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── 3. lab_report_values (new) ──────────────────────────────
+-- ── 2. lab_reports (fresh CREATE — table did not exist) ─────
+CREATE TABLE IF NOT EXISTS lab_reports (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  patient_id               UUID REFERENCES patients(id) ON DELETE CASCADE,
+  doctor_id                UUID REFERENCES doctors(id),
+  order_id                 UUID REFERENCES lab_orders(id) NULL,
+  report_name              VARCHAR(200),
+  test_name                VARCHAR(200),
+  test_category            VARCHAR(50),
+  lab_name                 VARCHAR(100),
+  report_date              DATE,
+  received_date            DATE DEFAULT CURRENT_DATE,
+  report_source            VARCHAR(30) DEFAULT 'dashboard_upload',
+  pdf_url                  TEXT,
+  image_url                TEXT,
+  status                   VARCHAR(30) DEFAULT 'Pending Review',
+  result_summary           TEXT,
+  ocr_raw_text             TEXT,
+  extracted_values         JSONB,
+  doctor_notes             TEXT,
+  whatsapp_sent_to_patient BOOLEAN DEFAULT FALSE,
+  external_order_id        VARCHAR(100),
+  lab_source               VARCHAR(50),
+  raw_api_payload          JSONB,
+  created_at               TIMESTAMPTZ DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── 3. lab_report_values ────────────────────────────────────
 CREATE TABLE IF NOT EXISTS lab_report_values (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   report_id          UUID REFERENCES lab_reports(id) ON DELETE CASCADE,
@@ -78,7 +80,8 @@ CREATE INDEX IF NOT EXISTS idx_lab_orders_doctor
 CREATE INDEX IF NOT EXISTS idx_lab_orders_patient
   ON lab_orders(patient_id);
 
--- ── 5. Storage bucket (run separately if needed) ─────────────
+-- ── 5. Storage bucket ────────────────────────────────────────
+-- Run this separately if the bucket doesn't exist yet:
 -- INSERT INTO storage.buckets (id, name, public)
 -- VALUES ('lab-reports', 'lab-reports', true)
 -- ON CONFLICT DO NOTHING;
