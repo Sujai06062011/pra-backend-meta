@@ -2243,7 +2243,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 )
                 new_state = "idle"
             else:
-                # Multiple patients — check who has pending orders first
+                # Multiple patients — show only those with pending orders
                 pt_ids = [p["id"] for p in all_pts]
                 ord_res = _supa.table("lab_orders") \
                     .select("patient_id") \
@@ -2252,9 +2252,10 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     .execute()
                 pending_ids = {r["patient_id"] for r in (ord_res.data or [])}
 
-                # Patients with pending orders first, then rest
-                ordered_pts = [p for p in all_pts if p["id"] in pending_ids] + \
-                              [p for p in all_pts if p["id"] not in pending_ids]
+                # Only patients with pending orders; fall back to all if none
+                ordered_pts = [p for p in all_pts if p["id"] in pending_ids]
+                if not ordered_pts:
+                    ordered_pts = all_pts  # no pending orders — show everyone
                 ordered_pts = ordered_pts[:10]  # WhatsApp list max
 
                 if len(ordered_pts) <= 3:
