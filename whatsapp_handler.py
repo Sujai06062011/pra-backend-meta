@@ -34,6 +34,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot", "awaiting_session_selection", "awaiting_slot_selection",
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
+    "awaiting_prescription_patient_select",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -795,6 +796,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "query_doctor_selected"
     elif current_state == "awaiting_query":
         intent = "query_text_provided"
+    elif current_state == "awaiting_prescription_patient_select":
+        intent = "prescription_patient_selected"
     elif current_state == "awaiting_doctor_select":
         intent = "doctor_selected"
     # Legacy family states — redirect to new booking flow
@@ -2012,46 +2015,37 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         if not all_patients:
             reply = "No patient records found for this number.\n\nReply 1 to book an appointment." + MENU_HINT
             new_state = "idle"
-        else:
-            # Collect all patient IDs and fetch latest prescription across all of them
-            pat_ids = [p["id"] for p in all_patients]
-            pres_rows = []
-            for pid in pat_ids:
-                res = _supa.table("prescriptions") \
-                    .select("id, prescription_date, pdf_url, patient_id, patients(name, patient_code)") \
-                    .eq("patient_id", pid) \
-                    .order("prescription_date", desc=True) \
-                    .limit(1).execute()
-                if res.data:
-                    pres_rows.append(res.data[0])
-
-            if not pres_rows:
+        elif len(all_patients) == 1:
+            # Only one patient — skip selection, go straight to their prescription
+            p = all_patients[0]
+            res = _supa.table("prescriptions") \
+                .select("id, prescription_date, pdf_url, patients(name, patient_code)") \
+                .eq("patient_id", p["id"]) \
+                .order("prescription_date", desc=True) \
+                .limit(1).execute()
+            if not res.data:
                 reply = (
-                    "No prescriptions found for your account.\n\n"
+                    f"No prescriptions found for {p.get('name', 'your account')}.\n\n"
                     "Please visit the clinic to get your prescription." + MENU_HINT
                 )
                 new_state = "idle"
             else:
-                # Pick the most recent across all patients
-                latest = max(pres_rows, key=lambda r: r.get("prescription_date") or "")
+                latest = res.data[0]
                 pdf_url = latest.get("pdf_url") or ""
                 pat_info = latest.get("patients") or {}
-                pat_name = pat_info.get("name") or "Patient"
+                pat_name = pat_info.get("name") or p.get("name") or "Patient"
                 pat_code = pat_info.get("patient_code") or ""
-                pdate    = latest.get("prescription_date") or ""
+                pdate = latest.get("prescription_date") or ""
                 try:
                     import datetime as _dt
                     pdate_fmt = _dt.date.fromisoformat(pdate).strftime("%d %b %Y")
                 except Exception:
                     pdate_fmt = pdate
-
                 if pdf_url:
-                    # Send PDF directly — import send_meta_document lazily to avoid circular import
                     from main import send_meta_document
                     fn = f"Prescription-{pat_name.replace(' ','-')}-{pdate_fmt.replace(' ','')}.pdf"
                     await send_meta_document(
-                        from_number,
-                        pdf_url,
+                        from_number, pdf_url,
                         caption=f"📋 Prescription for {pat_name}" + (f" ({pat_code})" if pat_code else "") + f"\nDate: {pdate_fmt}",
                         filename=fn,
                     )
@@ -2059,7 +2053,104 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                     return None
                 else:
                     reply = (
-                        f"Your latest prescription is from {pdate_fmt}.\n\n"
+                        f"Your latest prescription for {pat_name} is from {pdate_fmt}.\n\n"
+                        "Please ask your doctor to resend it via WhatsApp to get the PDF." + MENU_HINT
+                    )
+                    new_state = "idle"
+        else:
+            # Multiple patients — show selection list
+            rows = [
+                {
+                    "id": f"rxpat_{p['id']}",
+                    "title": p.get("name", "")[:24],
+                    "description": format_member_list_description(p),
+                }
+                for p in all_patients
+            ]
+            if len(all_patients) <= 3:
+                buttons = [
+                    {"id": f"rxpat_{p['id']}", "title": format_member_button_title(p)}
+                    for p in all_patients
+                ]
+                await send_meta_buttons(
+                    to_number=from_number,
+                    body_text="📋 *My Prescriptions*\n\nWhose prescription would you like?",
+                    buttons=buttons,
+                    footer_text="Reply MENU for main menu",
+                )
+            else:
+                await send_meta_list(
+                    to_number=from_number,
+                    body_text="📋 *My Prescriptions*\n\nWhose prescription would you like?",
+                    button_label="Select patient",
+                    sections=[{"title": "Family members", "rows": rows}],
+                    footer_text="Reply MENU for main menu",
+                )
+            new_state = "awaiting_prescription_patient_select"
+            new_temp  = {"rx_patients": all_patients}
+
+    elif intent == "prescription_patient_selected":
+        all_patients = temp_data.get("rx_patients", [])
+        # Resolve selection — button/list reply: "rxpat_<uuid>", text: number
+        selected_patient = None
+        if t.startswith("rxpat_"):
+            pid = t[len("rxpat_"):]
+            selected_patient = next((p for p in all_patients if p["id"] == pid), None)
+        else:
+            try:
+                idx = int(t) - 1
+                if 0 <= idx < len(all_patients):
+                    selected_patient = all_patients[idx]
+            except ValueError:
+                pass
+
+        if selected_patient is None:
+            # Invalid choice — re-send selection
+            rows = [
+                {"id": f"rxpat_{p['id']}", "title": p.get("name", "")[:24], "description": format_member_list_description(p)}
+                for p in all_patients
+            ]
+            nums = "\n".join(f"{i+1}. {p.get('name','')}" for i, p in enumerate(all_patients))
+            reply = f"Please choose a family member:\n\n{nums}" + MENU_HINT
+            new_state = "awaiting_prescription_patient_select"
+            new_temp  = temp_data
+        else:
+            res = _supa.table("prescriptions") \
+                .select("id, prescription_date, pdf_url, patients(name, patient_code)") \
+                .eq("patient_id", selected_patient["id"]) \
+                .order("prescription_date", desc=True) \
+                .limit(1).execute()
+            if not res.data:
+                reply = (
+                    f"No prescriptions found for {selected_patient.get('name', 'this patient')}.\n\n"
+                    "Please visit the clinic to get your prescription." + MENU_HINT
+                )
+                new_state = "idle"
+            else:
+                latest = res.data[0]
+                pdf_url = latest.get("pdf_url") or ""
+                pat_info = latest.get("patients") or {}
+                pat_name = pat_info.get("name") or selected_patient.get("name") or "Patient"
+                pat_code = pat_info.get("patient_code") or ""
+                pdate = latest.get("prescription_date") or ""
+                try:
+                    import datetime as _dt
+                    pdate_fmt = _dt.date.fromisoformat(pdate).strftime("%d %b %Y")
+                except Exception:
+                    pdate_fmt = pdate
+                if pdf_url:
+                    from main import send_meta_document
+                    fn = f"Prescription-{pat_name.replace(' ','-')}-{pdate_fmt.replace(' ','')}.pdf"
+                    await send_meta_document(
+                        from_number, pdf_url,
+                        caption=f"📋 Prescription for {pat_name}" + (f" ({pat_code})" if pat_code else "") + f"\nDate: {pdate_fmt}",
+                        filename=fn,
+                    )
+                    save_conversation_state(from_number, "idle", {})
+                    return None
+                else:
+                    reply = (
+                        f"Latest prescription for {pat_name} is from {pdate_fmt}.\n\n"
                         "Please ask your doctor to resend it via WhatsApp to get the PDF." + MENU_HINT
                     )
                     new_state = "idle"

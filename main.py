@@ -822,6 +822,13 @@ async def meta_webhook_inbound(request: Request):
                         print(f"[STALE] query doctor list ignored, state={current_state}")
                     else:
                         await handle_inbound_message(from_number, list_id, clinic_number)
+                elif list_id.startswith("rxpat_"):
+                    # prescription patient selection
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_prescription_patient_select":
+                        print(f"[STALE] rxpat list ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, list_id, clinic_number)
                 else:
                     list_id_to_text = {
                         "menu_book_appointment":  "1",
@@ -848,6 +855,12 @@ async def meta_webhook_inbound(request: Request):
                             "Reply MENU to start over or continue your booking.")
                     else:
                         await handle_member_interactive(from_number, button_id, clinic_number)
+                elif button_id.startswith("rxpat_"):
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_prescription_patient_select":
+                        print(f"[STALE] rxpat button ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, button_id, clinic_number)
                 else:
                     parts = button_id.split("__", 1)
                     action = parts[0]
