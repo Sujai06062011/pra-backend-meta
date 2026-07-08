@@ -88,14 +88,15 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
         print(f"[TRANSCRIBE] upload-files response keys: {list(up_data.keys())}")
         # API returns upload_urls as dict {filename: url} or list [{url:...}]
         raw_urls = up_data.get("upload_urls") or up_data.get("files") or {}
+        print(f"[TRANSCRIBE] raw_urls type={type(raw_urls).__name__} value={str(raw_urls)[:300]}")
         if isinstance(raw_urls, dict):
-            # {"recording.webm": "https://presigned-url..."}
             presigned_upload = next(iter(raw_urls.values()), None)
         elif isinstance(raw_urls, list) and raw_urls:
             entry = raw_urls[0]
             presigned_upload = entry if isinstance(entry, str) else (entry.get("url") or entry.get("upload_url"))
         else:
             presigned_upload = None
+        print(f"[TRANSCRIBE] presigned_upload={str(presigned_upload)[:120]}")
         if not isinstance(presigned_upload, str):
             raise HTTPException(status_code=502, detail=f"Could not extract presigned URL from upload-files: {up_data}")
 
@@ -107,7 +108,7 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
                 headers={"Content-Type": mime},
             )
         if put_resp.status_code not in (200, 201, 204):
-            raise HTTPException(status_code=502, detail=f"Audio upload failed: {put_resp.status_code}")
+            raise HTTPException(status_code=502, detail=f"Audio upload PUT failed: {put_resp.status_code} {put_resp.text[:200]}")
         print(f"[TRANSCRIBE] audio uploaded → {put_resp.status_code}")
 
         # ── Step 4: Start job ─────────────────────────────────────────────────
