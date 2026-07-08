@@ -101,15 +101,16 @@ async def transcribe_audio_endpoint(audio: UploadFile = File(...)):
         if not isinstance(presigned_upload, str):
             raise HTTPException(status_code=502, detail=f"Could not extract presigned URL from upload-files: {up_data}")
 
-        # ── Step 3: PUT audio to presigned URL (no auth header — it's cloud storage) ──
+        # ── Step 3: PUT audio to presigned URL (Azure Blob — needs BlockBlob header) ──
         async with httpx.AsyncClient(timeout=120) as client:
             put_resp = await client.put(
                 presigned_upload,
                 content=audio_bytes,
-                headers={"Content-Type": mime},
+                headers={"Content-Type": mime, "x-ms-blob-type": "BlockBlob"},
             )
+        print(f"[TRANSCRIBE] PUT → {put_resp.status_code}")
         if put_resp.status_code not in (200, 201, 204):
-            raise HTTPException(status_code=502, detail=f"Audio upload PUT failed: {put_resp.status_code} {put_resp.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"Audio upload PUT failed: {put_resp.status_code} {put_resp.text[:300]}")
         print(f"[TRANSCRIBE] audio uploaded → {put_resp.status_code}")
 
         # ── Step 4: Start job ─────────────────────────────────────────────────
