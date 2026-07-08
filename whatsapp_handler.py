@@ -2256,39 +2256,61 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 ordered_pts = [p for p in all_pts if p["id"] in pending_ids]
                 if not ordered_pts:
                     ordered_pts = all_pts  # no pending orders — show everyone
-                ordered_pts = ordered_pts[:10]  # WhatsApp list max
 
-                if len(ordered_pts) <= 3:
-                    buttons = [
-                        {"id": f"labpt_{p['id']}", "title": p["name"][:20]}
-                        for p in ordered_pts
-                    ]
-                    await send_meta_buttons(
-                        to_number=from_number,
-                        body_text="Who is this report for?",
-                        buttons=buttons,
-                        footer_text="Select the family member",
+                # If only 1 patient qualifies, skip the picker and ingest directly
+                if len(ordered_pts) == 1:
+                    _pid  = ordered_pts[0]["id"]
+                    _name = ordered_pts[0]["name"]
+                    try:
+                        from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
+                        _result = await receive_whatsapp_report(WhatsAppReportBody(
+                            mobile=from_number, document_url=doc_url,
+                            document_name=doc_name, mime_type=mime, patient_id=_pid,
+                        ))
+                    except Exception as _le:
+                        print(f"[LAB WA] ingest error: {_le}")
+                        _result = {"ok": False}
+                    reply = (
+                        f"✅ Report received for *{_name}* and linked to their record.\n\n"
+                        f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
+                    ) if _result.get("ok") else (
+                        f"Thank you! The report for {_name} has been noted. "
+                        f"{doctor_name} will follow up shortly." + MENU_HINT
                     )
+                    new_state = "idle"
                 else:
-                    rows = [
-                        {
-                            "id": f"labpt_{p['id']}",
-                            "title": p["name"][:24],
-                            "description": (
-                                ("⏳ Pending order" if p["id"] in pending_ids else "") +
-                                (f" · {p['age']} yrs" if p.get("age") else "")
-                            ).strip(" · "),
-                        }
-                        for p in ordered_pts
-                    ]
-                    await send_meta_list(
-                        to_number=from_number,
-                        body_text="Who is this report for?\n\n⏳ = has a pending test order",
-                        button_label="Select patient",
-                        sections=[{"title": "Family Members", "rows": rows}],
-                    )
-                new_state = "awaiting_lab_patient_select"
-                new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
+                    ordered_pts = ordered_pts[:10]  # WhatsApp list max
+                    if len(ordered_pts) <= 3:
+                        buttons = [
+                            {"id": f"labpt_{p['id']}", "title": p["name"][:20]}
+                            for p in ordered_pts
+                        ]
+                        await send_meta_buttons(
+                            to_number=from_number,
+                            body_text="Who is this report for?",
+                            buttons=buttons,
+                            footer_text="Select the family member",
+                        )
+                    else:
+                        rows = [
+                            {
+                                "id": f"labpt_{p['id']}",
+                                "title": p["name"][:24],
+                                "description": (
+                                    ("⏳ Pending order" if p["id"] in pending_ids else "") +
+                                    (f" · {p['age']} yrs" if p.get("age") else "")
+                                ).strip(" · "),
+                            }
+                            for p in ordered_pts
+                        ]
+                        await send_meta_list(
+                            to_number=from_number,
+                            body_text="Who is this report for?\n\n⏳ = has a pending test order",
+                            button_label="Select patient",
+                            sections=[{"title": "Family Members", "rows": rows}],
+                        )
+                    new_state = "awaiting_lab_patient_select"
+                    new_temp  = {"doc_url": doc_url, "doc_name": doc_name, "mime": mime}
         else:
             reply = "No problem! How else can I help you?" + MENU_HINT
             new_state = "idle"
