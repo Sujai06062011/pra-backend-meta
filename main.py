@@ -2572,7 +2572,7 @@ async def queue_set_token(request: Request):
 async def get_prescription_detail(prescription_id: str):
     from database import supabase
     result = supabase.table("prescriptions").select(
-        "*, patients(id, name, mobile, patient_code, age, gender, language), prescription_medicines(*), visits(id, chief_complaint, diagnosis, notes)"
+        "*, patients(id, name, mobile, patient_code, age, gender, language), prescription_medicines(*), visits(id, chief_complaint, diagnosis, notes, past_history, allergies, lab_findings)"
     ).eq("id", prescription_id).execute()
     if not result.data:
         return {}
@@ -2580,10 +2580,13 @@ async def get_prescription_detail(prescription_id: str):
     # For walk-in: inject complaint/diagnosis as a synthetic visits object so frontend can load them
     if not row.get("patient_id") and not row.get("visits") and row.get("walkin_complaint"):
         row["visits"] = {
-            "id": None,
+            "id":              None,
             "chief_complaint": row.get("walkin_complaint", ""),
             "diagnosis":       row.get("walkin_diagnosis", ""),
             "notes":           row.get("general_notes", ""),
+            "past_history":    None,
+            "allergies":       None,
+            "lab_findings":    None,
         }
     return row
 
@@ -2600,13 +2603,16 @@ async def update_prescription(prescription_id: str, request: Request, background
         "general_notes":        body.get("notes", ""),
     }).eq("id", prescription_id).execute()
 
-    # 2. Update visit (chief_complaint + diagnosis) if visit_id present
+    # 2. Update visit if visit_id present
     visit_id = body.get("visit_id")
     if visit_id:
         supabase.table("visits").update({
             "chief_complaint": body.get("chief_complaint", ""),
             "diagnosis":       body.get("diagnosis", ""),
             "notes":           body.get("notes", ""),
+            "past_history":    body.get("past_history", "") or None,
+            "allergies":       body.get("allergies", "") or None,
+            "lab_findings":    body.get("lab_findings", "") or None,
         }).eq("id", visit_id).execute()
 
     # 3. Replace medicines: delete all, re-insert
@@ -3254,10 +3260,16 @@ async def create_prescription_v2(request: Request, background_tasks: BackgroundT
     # Complete a pre-created visit (eager visit from the prescription page)
     visit_id = visit_id_req
     if visit_id:
+        past_history  = body.get("past_history", "") or None
+        allergies     = body.get("allergies", "") or None
+        lab_findings  = body.get("lab_findings", "") or None
         visit_update = {
             "chief_complaint": chief_complaint,
             "diagnosis":       diagnosis,
             "visit_status":    "Completed",
+            "past_history":    past_history,
+            "allergies":       allergies,
+            "lab_findings":    lab_findings,
         }
         if appointment_id:
             visit_update["appointment_id"] = appointment_id
@@ -3265,12 +3277,18 @@ async def create_prescription_v2(request: Request, background_tasks: BackgroundT
 
     # Auto-create visit if patient linked and no visit provided
     if patient_id and not visit_id:
+        past_history  = body.get("past_history", "") or None
+        allergies     = body.get("allergies", "") or None
+        lab_findings  = body.get("lab_findings", "") or None
         visit_res = db.table("visits").insert({
             "patient_id":      patient_id,
             "doctor_id":       doctor_id_req,
             "appointment_id":  appointment_id,
             "chief_complaint": chief_complaint,
             "diagnosis":       diagnosis,
+            "past_history":    past_history,
+            "allergies":       allergies,
+            "lab_findings":    lab_findings,
             "visit_status":    "Completed",
             "visit_date":      today_str,
             "created_at":      now_ist.isoformat(),
@@ -3446,7 +3464,7 @@ async def send_prescription_whatsapp(prescription_id: str):
             import uuid as _uuid
 
             # Build PDF data dict
-            _vis_res = db.table("visits").select("chief_complaint, diagnosis, notes").eq("id", pres.get("visit_id", "")).limit(1).execute()
+            _vis_res = db.table("visits").select("chief_complaint, diagnosis, notes, past_history, allergies, lab_findings").eq("id", pres.get("visit_id", "")).limit(1).execute()
             _vis = (_vis_res.data or [{}])[0]
             _doc_q = db.table("doctors").select("name, clinic_name").eq("id", pres.get("doctor_id", "")).limit(1).execute()
             _doc_d = (_doc_q.data or [{}])[0]
@@ -3461,6 +3479,9 @@ async def send_prescription_whatsapp(prescription_id: str):
                 "visit_date":            pdate_fmt,
                 "chief_complaint":       _vis.get("chief_complaint") or "",
                 "diagnosis":             _vis.get("diagnosis") or "",
+                "past_history":          _vis.get("past_history") or "",
+                "allergies":             _vis.get("allergies") or "",
+                "lab_findings":          _vis.get("lab_findings") or "",
                 "medicines":             medicines,
                 "dietary_instructions":  pres.get("dietary_instructions") or "",
                 "precautions":           pres.get("precautions") or "",

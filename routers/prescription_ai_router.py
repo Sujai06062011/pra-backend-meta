@@ -383,6 +383,9 @@ def build_pdf_bytes(data: dict) -> bytes:
     visit_date     = data.get("visit_date") or datetime.now(IST).strftime("%d %b %Y")
     chief_complaint= data.get("chief_complaint", "")
     diagnosis      = data.get("diagnosis",       "")
+    past_history   = data.get("past_history",    "")
+    allergies      = data.get("allergies",       "")
+    lab_findings   = data.get("lab_findings",    "")
     medicines      = data.get("medicines",       [])
     dietary        = data.get("dietary_instructions", "")
     precautions    = data.get("precautions",     "")
@@ -495,6 +498,17 @@ def build_pdf_bytes(data: dict) -> bytes:
     if diagnosis:
         story.append(Paragraph("DIAGNOSIS", sect))
         story.append(Paragraph(f"<b>{diagnosis}</b>", body))
+
+    # ── History ───────────────────────────────────────────────────────────────
+    if past_history or allergies or lab_findings:
+        story.append(Paragraph("HISTORY", sect))
+        if past_history:
+            story.append(Paragraph(f"<b>Past History:</b> {past_history}", body))
+        if allergies:
+            allergy_color = "red" if allergies.upper() not in ("NKDA", "NIL", "NONE", "NO KNOWN ALLERGIES") else "grey"
+            story.append(Paragraph(f"<b><font color='{allergy_color}'>Allergies:</font></b> {allergies}", body))
+        if lab_findings:
+            story.append(Paragraph(f"<b>Investigations:</b> {lab_findings}", body))
 
     # ── Medicines ─────────────────────────────────────────────────────────────
     valid_meds = [m for m in medicines if (m.get("medicine_name") or m.get("name") or "").strip()]
