@@ -2740,6 +2740,53 @@ async def update_prescription(prescription_id: str, request: Request, background
             await send_meta_text(mobile, msg)
             whatsapp_sent = True
 
+            # Also send PDF attachment
+            try:
+                from routers.prescription_ai_router import build_pdf_bytes as _build_pdf
+                import uuid as _uuid, traceback as _tb2
+                print(f"[PDF SEND] building PDF for updated prescription {prescription_id}")
+                _vis_id = body.get("visit_id") or supabase.table("prescriptions").select("visit_id").eq("id", prescription_id).limit(1).execute().data[0].get("visit_id")
+                _vis2 = {}
+                if _vis_id:
+                    _vis2_res = supabase.table("visits").select("chief_complaint, diagnosis, notes, past_history, allergies, lab_findings").eq("id", _vis_id).limit(1).execute()
+                    _vis2 = (_vis2_res.data or [{}])[0]
+                _doc2_q = supabase.table("doctors").select("name, clinic_name").eq("id", body.get("doctor_id", "")).limit(1).execute()
+                _doc2 = (_doc2_q.data or [{}])[0]
+                _pdf2_data = {
+                    "clinic_name":          _doc2.get("clinic_name") or "",
+                    "doctor_name":          _doc2.get("name") or "",
+                    "patient_name":         pname,
+                    "patient_age":          patient.get("age") or "",
+                    "patient_gender":       patient.get("gender") or "",
+                    "patient_code":         pcode,
+                    "visit_date":           now_ist.strftime("%d %b %Y"),
+                    "chief_complaint":      body.get("chief_complaint") or _vis2.get("chief_complaint") or "",
+                    "diagnosis":            diagnosis,
+                    "past_history":         body.get("past_history") or _vis2.get("past_history") or "",
+                    "allergies":            body.get("allergies") or _vis2.get("allergies") or "",
+                    "lab_findings":         body.get("lab_findings") or _vis2.get("lab_findings") or "",
+                    "medicines":            medicines,
+                    "dietary_instructions": dietary,
+                    "precautions":          precautions,
+                    "notes":                body.get("notes") or "",
+                    "vitals":               {},
+                }
+                _pdf2_bytes = _build_pdf(_pdf2_data)
+                print(f"[PDF SEND] built {len(_pdf2_bytes)} bytes")
+                _bucket2  = "prescription-pdfs"
+                _fname2   = f"prescriptions/{_uuid.uuid4()}.pdf"
+                supabase.storage.from_(_bucket2).upload(_fname2, _pdf2_bytes, {"content-type": "application/pdf", "upsert": "true"})
+                _pdf2_url = supabase.storage.from_(_bucket2).get_public_url(_fname2)
+                print(f"[PDF SEND] URL: {_pdf2_url}")
+                _pat_fn2 = pname.replace(" ", "-")
+                _dr = await send_meta_document(mobile, _pdf2_url,
+                    caption=f"Prescription from Dr. {_doc2.get('name', 'Kumar')}",
+                    filename=f"Prescription-{_pat_fn2}-{now_ist.strftime('%d%b%Y')}.pdf",
+                )
+                print(f"[PDF SEND] Meta doc response: {_dr}")
+            except Exception as _pe:
+                print(f"[PDF SEND] FAILED — {_pe}\n{_tb2.format_exc()}")
+
     except Exception as we:
         print(f"⚠️ WhatsApp send error on update: {we}")
 
