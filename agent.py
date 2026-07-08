@@ -163,6 +163,28 @@ TOOLS = [
         },
     },
     {
+        "name": "send_prescription",
+        "description": (
+            "Fetch and send the latest prescription PDF for a patient via WhatsApp. "
+            "Call when patient asks for 'prescription', 'latest prescription', 'my medicine', or 'share prescription'. "
+            "Use patient_id from get_patient. Sends the PDF directly to their WhatsApp."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patient_id": {
+                    "type": "string",
+                    "description": "Patient UUID from get_patient result",
+                },
+                "mobile": {
+                    "type": "string",
+                    "description": "Mobile number with country code to send PDF to",
+                },
+            },
+            "required": ["patient_id", "mobile"],
+        },
+    },
+    {
         "name": "add_family_member",
         "description": (
             "Add a new family member to an existing patient account. "
@@ -454,6 +476,38 @@ def _tool_register_patient(mobile: str, name: str, dob: str, gender: str,
         return {"success": False, "reason": str(e)}
 
 
+async def _tool_send_prescription(patient_id: str, mobile: str) -> dict:
+    from database import supabase as supa
+    import datetime as _dt
+    res = supa.table("prescriptions") \
+        .select("id, prescription_date, pdf_url, patients(name, patient_code)") \
+        .eq("patient_id", patient_id) \
+        .order("prescription_date", desc=True) \
+        .limit(1).execute()
+    if not res.data:
+        return {"success": False, "reason": "No prescriptions found for this patient"}
+    latest = res.data[0]
+    pdf_url = latest.get("pdf_url") or ""
+    pat_info = latest.get("patients") or {}
+    pat_name = pat_info.get("name") or "Patient"
+    pat_code = pat_info.get("patient_code") or ""
+    pdate = latest.get("prescription_date") or ""
+    try:
+        pdate_fmt = _dt.date.fromisoformat(pdate).strftime("%d %b %Y")
+    except Exception:
+        pdate_fmt = pdate
+    if not pdf_url:
+        return {"success": False, "reason": f"Prescription from {pdate_fmt} exists but PDF not yet generated. Ask doctor to resend via WhatsApp."}
+    from main import send_meta_document
+    fn = f"Prescription-{pat_name.replace(' ','-')}-{pdate_fmt.replace(' ','')}.pdf"
+    await send_meta_document(
+        mobile, pdf_url,
+        caption=f"📋 Prescription for {pat_name}" + (f" ({pat_code})" if pat_code else "") + f"\nDate: {pdate_fmt}",
+        filename=fn,
+    )
+    return {"success": True, "patient": pat_name, "date": pdate_fmt}
+
+
 def _tool_add_family_member(primary_mobile: str, name: str, dob: str,
                              gender: str, doctor_id: str, relationship: str = "") -> dict:
     from database import supabase as supa, _next_patient_counter
@@ -521,7 +575,7 @@ def _tool_add_family_member(primary_mobile: str, name: str, dob: str,
 
 # ── Tool dispatcher ────────────────────────────────────────────────────────────
 
-def _dispatch_tool(name: str, inputs: dict, doctor_id: str = DEFAULT_DOCTOR_ID, clinic_name: str = "") -> str:
+async def _dispatch_tool(name: str, inputs: dict, doctor_id: str = DEFAULT_DOCTOR_ID, clinic_name: str = "") -> str:
     """Maps Claude's tool calls to actual database functions.
     doctor_id and clinic_name are threaded from run_clinic_agent for correct scoping."""
     try:
@@ -560,6 +614,8 @@ def _dispatch_tool(name: str, inputs: dict, doctor_id: str = DEFAULT_DOCTOR_ID, 
                 inputs["gender"], inputs.get("doctor_id") or doctor_id,
                 inputs.get("relationship", ""),
             )
+        elif name == "send_prescription":
+            result = await _tool_send_prescription(inputs["patient_id"], inputs["mobile"])
         else:
             result = {"error": f"Unknown tool: {name}"}
     except Exception as e:
@@ -710,7 +766,13 @@ Please mention your token when you arrive.
 Reply CANCEL to cancel. Reply MENU for help.
 
 11. Never make up information. If a tool fails, tell patient honestly and offer to help via another way.
-12. If patient sends "MENU", "BYE", or a number 1-6 — do NOT handle it. Return empty string so state machine takes over."""
+12. If patient sends "MENU", "BYE", or a number 1-6 — do NOT handle it. Return empty string so state machine takes over.
+13. If patient asks for a prescription (any phrasing — "share prescription", "latest prescription", "my medicine list", voice notes, etc.):
+    - Call get_patient(mobile="{mobile}") first to get patient list
+    - If multiple patients, ask which one they mean (use patient names from the list)
+    - Call send_prescription(patient_id=..., mobile="{mobile}") — it sends the PDF directly
+    - After success reply: "✅ Sent your latest prescription for [Name] (Date). Check your WhatsApp messages."
+    - If send_prescription returns success=False, share the reason clearly."""
 
     history.append({"role": "user", "content": text})
 
@@ -752,7 +814,7 @@ Reply CANCEL to cancel. Reply MENU for help.
             for block in response.content:
                 if hasattr(block, "type") and block.type == "tool_use":
                     print(f"[AGENT] Tool: {block.name}({json.dumps(block.input)[:200]})")
-                    result_str = _dispatch_tool(block.name, block.input, doctor_id, clinic_name)
+                    result_str = await _dispatch_tool(block.name, block.input, doctor_id, clinic_name)
                     print(f"[AGENT] Result: {result_str[:200]}")
                     tool_results.append({
                         "type": "tool_result",
