@@ -2375,7 +2375,7 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 )
                 # Store pending OCR data for confirmed save
                 new_state = "awaiting_lab_mismatch_confirm"
-                temp_data = {**temp_data, "mismatch_pending": _result}
+                new_temp  = {**temp_data, "mismatch_pending": _result}
                 reply = None  # already sent via buttons
             elif _result.get("ok"):
                 reply = (
