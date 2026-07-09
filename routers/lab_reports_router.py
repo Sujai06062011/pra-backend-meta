@@ -438,80 +438,76 @@ async def send_report_to_patient(report_id: str, doctor_id: str):
         raise HTTPException(404, "Report not found")
     r = res.data[0]
 
-    pat = r.get("patients") or {}
-    pat_name  = pat.get("name", "Patient")
-    pat_mobile = pat.get("mobile", "")
-    lang      = (pat.get("language") or "english").lower()
-    doc_name  = (r.get("doctors") or {}).get("name", "Doctor")
-    test_name = r.get("test_name") or r.get("report_name", "Lab Report")
-    lab_name  = r.get("lab_name") or ""
+    pat          = r.get("patients") or {}
+    pat_name     = pat.get("name", "Patient")
+    pat_mobile   = pat.get("mobile", "")
+    doc_name     = (r.get("doctors") or {}).get("name", "Doctor")
+    test_name    = r.get("test_name") or r.get("report_name", "Lab Report")
+    lab_name     = r.get("lab_name") or ""
     report_date_str = str(r.get("report_date") or r.get("received_date") or "")[:10]
-    pdf_url   = r.get("pdf_url") or ""
+    pdf_url      = r.get("pdf_url") or ""
     doctor_notes = r.get("doctor_notes") or ""
 
-    # Build parameter summary
+    # Parameter counts from lab_report_values (source of truth)
     pvals = supabase.table("lab_report_values") \
-        .select("parameter_name, value, unit, ref_low, ref_high, status") \
+        .select("parameter_name, value, unit, status") \
         .eq("report_id", report_id) \
         .order("parameter_name").execute()
     params = pvals.data or []
 
-    normal_params   = [p for p in params if p.get("status") == "Normal"]
-    abnormal_params = [p for p in params if p.get("status") not in ("Normal",) and p.get("status")]
     critical_params = [p for p in params if "Critical" in (p.get("status") or "")]
+    abnormal_params = [p for p in params if p.get("status") in ("High", "Low")]
+    normal_count    = len(params) - len(critical_params) - len(abnormal_params)
 
-    def _status_icon(s: str) -> str:
-        if "Critical" in s: return "🔴"
-        if s in ("High", "Low"): return "⚠️"
-        return "✅"
-
-    findings_lines = []
-    for p in critical_params:
-        ref = ""
-        if p.get("ref_low") is not None and p.get("ref_high") is not None:
-            ref = f" — normal is {p['ref_low']}-{p['ref_high']}"
-        findings_lines.append(
-            f"🔴 {p['parameter_name']}: {p['value']} {p.get('unit','')}{ref} ({p['status']})"
-        )
-    for p in [x for x in abnormal_params if "Critical" not in (x.get("status") or "")]:
-        findings_lines.append(
-            f"⚠️ {p['parameter_name']}: {p['value']} {p.get('unit','')}"
-        )
-    if normal_params:
-        names = ", ".join(p["parameter_name"] for p in normal_params[:5])
-        if len(normal_params) > 5:
-            names += f" + {len(normal_params)-5} more"
-        findings_lines.append(f"✅ Normal: {names}")
-
-    critical_warning = (
-        "\n\n🚨 *Please contact the clinic immediately regarding critical values.*"
-        if critical_params else ""
-    )
-
-    report_link = f"\n\nFull report: {pdf_url}" if pdf_url else ""
-    notes_section = f"\n\nDr. {doc_name}'s advice:\n{doctor_notes}" if doctor_notes else ""
-
-    lab_part = f" from {lab_name}" if lab_name else ""
+    lab_part  = f" from {lab_name}" if lab_name else ""
     date_part = f" ({report_date_str})" if report_date_str else ""
 
-    msg = (
-        f"Dear {pat_name},\n\n"
-        f"Dr. {doc_name} has reviewed your *{test_name}* report{lab_part}{date_part}.\n\n"
-        f"📊 *Results Summary:*\n"
-        f"✅ Normal values: {len(normal_params)}\n"
-        f"⚠️ Needs attention: {len([p for p in abnormal_params if 'Critical' not in (p.get('status') or '')])}\n"
-        f"🔴 Critical: {len(critical_params)}\n\n"
-        f"*Key findings:*\n" + "\n".join(findings_lines) +
-        notes_section + critical_warning + report_link +
-        "\n\nReply MENU for options or book a follow-up appointment."
-    )
+    lines = [
+        f"Dear {pat_name},",
+        "",
+        f"Dr. {doc_name} has reviewed your *{test_name}* report{lab_part}{date_part}.",
+        "",
+        "📊 *Results Summary:*",
+        f"✅ Normal: {normal_count} value(s)",
+        f"⚠️ Needs attention: {len(abnormal_params)} value(s)",
+        f"🔴 Critical: {len(critical_params)} value(s)",
+    ]
 
-    # Send via Meta WhatsApp
+    if critical_params:
+        lines.append("")
+        lines.append("🔴 *Critical values:*")
+        for p in critical_params[:3]:
+            lines.append(f"  • {p['parameter_name']}: {p['value']} {p.get('unit','') or ''} ({p['status']})")
+        if len(critical_params) > 3:
+            lines.append(f"  • ...and {len(critical_params) - 3} more")
+
+    if abnormal_params:
+        lines.append("")
+        lines.append("⚠️ *Values needing attention:*")
+        for p in abnormal_params[:4]:
+            lines.append(f"  • {p['parameter_name']}: {p['value']} {p.get('unit','') or ''}")
+        if len(abnormal_params) > 4:
+            lines.append(f"  • ...and {len(abnormal_params) - 4} more")
+
+    if doctor_notes:
+        lines += ["", f"👨‍⚕️ *Dr. {doc_name}'s advice:*", doctor_notes]
+
+    if critical_params:
+        lines += ["", "🚨 *Please contact the clinic immediately regarding the critical values.*"]
+    else:
+        lines += ["", "Please book a follow-up if needed. 🏥"]
+
+    if pdf_url:
+        lines += ["", f"Full report: {pdf_url}"]
+
+    lines += ["", "Reply MENU for options."]
+
+    msg = "\n".join(lines)
+
     from main import send_meta_text
     mobile = pat_mobile if pat_mobile.startswith("91") else f"91{pat_mobile}"
     await send_meta_text(mobile, msg)
 
-    # Mark sent
     supabase.table("lab_reports") \
         .update({"whatsapp_sent_to_patient": True, "updated_at": datetime.utcnow().isoformat()}) \
         .eq("id", report_id).execute()
