@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, date, timedelta
 import re
 import config_loader
@@ -47,6 +48,95 @@ _SM_KEYWORDS = {
     "1", "2", "3", "4", "5", "6", "7",
     "my prescription", "prescription", "report",
 }
+
+
+async def _bg_lab_process(
+    from_number: str, doc_url: str, doc_name: str, mime: str,
+    patient_id: str, selected_name: str, doctor_name: str,
+) -> None:
+    """Background: download + OCR + extract → mismatch check or save → WA notification."""
+    from main import send_meta_text
+    try:
+        from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
+        result = await receive_whatsapp_report(WhatsAppReportBody(
+            mobile=from_number,
+            document_url=doc_url,
+            document_name=doc_name,
+            mime_type=mime,
+            patient_id=patient_id,
+        ))
+
+        if result.get("mismatch"):
+            ocr_name = result.get("ocr_name", "someone else")
+            msg = (
+                f"⚠️ The report appears to be for *{ocr_name}*, "
+                f"but you selected *{selected_name}*.\n\n"
+                f"Do you still want to tag this report to *{selected_name}*?"
+            )
+            await send_meta_buttons(
+                from_number, msg,
+                [{"id": "lab_mm_yes", "title": ("✅ Yes, tag to " + selected_name)[:20]},
+                 {"id": "lab_mm_no",  "title": "❌ No, cancel"}],
+            )
+            save_conversation_state(
+                from_number,
+                "awaiting_lab_mismatch_confirm",
+                {"mismatch_pending": result},
+            )
+        elif result.get("ok"):
+            test_name = result.get("test_name", "your report")
+            await send_meta_text(
+                from_number,
+                f"✅ Your report (*{test_name}*) has been linked to *{selected_name}*'s record.\n\n"
+                f"{doctor_name} will review it shortly. 🏥" + MENU_HINT,
+            )
+        else:
+            await send_meta_text(
+                from_number,
+                f"Thank you! {doctor_name} will follow up with you shortly." + MENU_HINT,
+            )
+    except Exception as e:
+        print(f"[LAB BG] error: {e}")
+        try:
+            from main import send_meta_text as _smt
+            await _smt(
+                from_number,
+                f"Thank you! {doctor_name} will follow up with you shortly." + MENU_HINT,
+            )
+        except Exception:
+            pass
+
+
+async def _bg_confirmed_save(
+    from_number: str, pending: dict,
+    selected_name: str, doctor_name: str,
+) -> None:
+    """Background: save pre-OCR'd report after mismatch confirmation → WA notification."""
+    from main import send_meta_text
+    try:
+        from routers.lab_reports_router import save_confirmed_whatsapp_report
+        result = await save_confirmed_whatsapp_report(pending)
+        if result.get("ok"):
+            await send_meta_text(
+                from_number,
+                f"✅ Report linked to *{selected_name}*'s record.\n\n"
+                f"{doctor_name} will review it shortly. 🏥" + MENU_HINT,
+            )
+        else:
+            await send_meta_text(
+                from_number,
+                f"Thank you! {doctor_name} will follow up with you shortly." + MENU_HINT,
+            )
+    except Exception as e:
+        print(f"[LAB BG CONFIRM] error: {e}")
+        try:
+            from main import send_meta_text as _smt
+            await _smt(
+                from_number,
+                f"Thank you! {doctor_name} will follow up with you shortly." + MENU_HINT,
+            )
+        except Exception:
+            pass
 
 
 def _should_use_agent(text: str, current_state: str, is_existing: bool) -> bool:
@@ -2347,67 +2437,38 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 pr = _supa.table("patients").select("name").eq("id", selected_pid).limit(1).execute()
                 selected_name = pr.data[0]["name"] if pr.data else "the patient"
 
-            try:
-                from routers.lab_reports_router import receive_whatsapp_report, WhatsAppReportBody
-                _result = await receive_whatsapp_report(WhatsAppReportBody(
-                    mobile=from_number,
-                    document_url=doc_url,
-                    document_name=doc_name,
-                    mime_type=mime,
-                    patient_id=selected_pid,
-                ))
-            except Exception as _le:
-                print(f"[LAB WA] ingest error: {_le}")
-                _result = {"ok": False}
-
-            if _result.get("mismatch"):
-                ocr_name = _result.get("ocr_name", "someone else")
-                reply = (
-                    f"⚠️ The report appears to be for *{ocr_name}*, "
-                    f"but you selected *{selected_name}*.\n\n"
-                    f"Do you still want to tag this report to *{selected_name}*?"
-                )
-                await send_meta_buttons(
-                    from_number,
-                    reply,
-                    [{"id": "lab_mm_yes", "title": ("✅ Yes, tag to " + selected_name)[:20]},
-                     {"id": "lab_mm_no",  "title": "❌ No, cancel"}],
-                )
-                # Store pending OCR data for confirmed save
-                new_state = "awaiting_lab_mismatch_confirm"
-                new_temp  = {**temp_data, "mismatch_pending": _result}
-                reply = None  # already sent via buttons
-            elif _result.get("ok"):
-                reply = (
-                    f"✅ Report received for *{selected_name}* and linked to their record.\n\n"
-                    f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
-                )
-                new_state = "idle"
-            else:
-                reply = (
-                    f"Thank you! The report for {selected_name} has been noted. "
-                    f"{doctor_name} will follow up shortly." + MENU_HINT
-                )
-                new_state = "idle"
+            # Instant ack — fire OCR + extraction in background
+            reply = (
+                f"⏳ Got it! Processing your report for *{selected_name}*. "
+                f"We'll send you an update once it's ready. 🔄"
+            )
+            new_state = "idle"
+            new_temp  = {}
+            asyncio.create_task(_bg_lab_process(
+                from_number=from_number,
+                doc_url=doc_url,
+                doc_name=doc_name,
+                mime=mime,
+                patient_id=selected_pid,
+                selected_name=selected_name,
+                doctor_name=doctor_name,
+            ))
 
     elif intent == "lab_mismatch_confirm_reply":
         pending = temp_data.get("mismatch_pending", {})
         selected_name = pending.get("selected_name", "the patient")
         tl = t.lower().strip()
         if tl in ("lab_mm_yes", "yes", "y", "ok", "okay", "confirm"):
-            try:
-                from routers.lab_reports_router import save_confirmed_whatsapp_report
-                _result = await save_confirmed_whatsapp_report(pending)
-            except Exception as _le:
-                print(f"[LAB WA] confirmed save error: {_le}")
-                _result = {"ok": False}
             reply = (
-                f"✅ Report tagged to *{selected_name}* and linked to their record.\n\n"
-                f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
-            ) if _result.get("ok") else (
-                f"Thank you! The report has been noted. "
-                f"{doctor_name} will follow up shortly." + MENU_HINT
+                f"⏳ Got it! Linking the report to *{selected_name}*'s record. "
+                f"We'll confirm once it's saved. 🔄"
             )
+            asyncio.create_task(_bg_confirmed_save(
+                from_number=from_number,
+                pending=pending,
+                selected_name=selected_name,
+                doctor_name=doctor_name,
+            ))
         else:
             reply = (
                 f"No problem! The report has not been tagged. "

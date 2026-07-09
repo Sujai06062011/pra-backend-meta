@@ -805,6 +805,7 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
         "status":    auto_status,
         "patient":   patient.get("name", ""),
         "ocr_name":  (extracted or {}).get("patient_name") or "",
+        "test_name": resolved_test,
     }
 
 
