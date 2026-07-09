@@ -658,6 +658,7 @@ class WhatsAppReportBody(BaseModel):
     mime_type: str
     test_category: Optional[str] = None
     patient_id: Optional[str] = None   # explicit override — set when patient selected from list
+    skip_mismatch_check: bool = False  # set True on confirmed re-ingest after mismatch
 
 
 @router.post("/whatsapp-report")
@@ -737,6 +738,34 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
             for p in extracted["parameters"]
         }
 
+    # Name mismatch check — return early for confirmation before saving
+    if not body.skip_mismatch_check and extracted:
+        ocr_name = (extracted.get("patient_name") or "").strip().lower()
+        selected_name = patient.get("name", "").strip().lower()
+        ocr_words = {w for w in ocr_name.split() if len(w) > 3}
+        sel_words  = {w for w in selected_name.split() if len(w) > 3}
+        names_match = bool(ocr_words & sel_words) or ocr_name in selected_name or selected_name in ocr_name
+        if ocr_name and selected_name and not names_match:
+            print(f"[LAB WA] name mismatch: OCR='{ocr_name}' selected='{selected_name}'")
+            return {
+                "ok": False,
+                "mismatch": True,
+                "ocr_name":      extracted.get("patient_name", ""),
+                "selected_name": patient["name"],
+                "patient_id":    patient_id,
+                "doctor_id":     doctor_id,
+                "public_url":    public_url,
+                "resolved_test": resolved_test,
+                "result_summary": result_summary,
+                "extracted_vals": extracted_vals,
+                "ocr_text":      ocr_text,
+                "auto_status":   auto_status,
+                "is_pdf":        is_pdf,
+                "test_category": body.test_category,
+                "extracted_params": extracted.get("parameters", []),
+                "report_date":   extracted.get("report_date"),
+            }
+
     row = {
         "patient_id":       patient_id,
         "doctor_id":        doctor_id,
@@ -774,33 +803,64 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
         if param_rows:
             supabase.table("lab_report_values").insert(param_rows).execute()
 
-    # OCR name mismatch check
-    if extracted:
-        ocr_name = (extracted.get("patient_name") or "").strip().lower()
-        selected_name = patient.get("name", "").strip().lower()
-        # Match if any significant word (>3 chars) from OCR name appears in selected name or vice versa
-        ocr_words = {w for w in ocr_name.split() if len(w) > 3}
-        sel_words  = {w for w in selected_name.split() if len(w) > 3}
-        names_match = bool(ocr_words & sel_words) or ocr_name in selected_name or selected_name in ocr_name
-        if ocr_name and selected_name and not names_match:
-            try:
-                from main import send_meta_text
-                wa_number = body.mobile if body.mobile.startswith("91") else f"91{body.mobile}"
-                mismatch_msg = (
-                    f"⚠️ *Name mismatch detected*\n\n"
-                    f"The report you uploaded appears to be for *{extracted['patient_name']}*, "
-                    f"but you selected *{patient['name']}* as the patient.\n\n"
-                    f"The report has been saved under *{patient['name']}*. "
-                    f"If this was uploaded for the wrong patient, please contact the clinic."
-                )
-                await send_meta_text(wa_number, mismatch_msg)
-                print(f"[LAB WA] name mismatch: OCR='{ocr_name}' selected='{selected_name}'")
-            except Exception as e:
-                print(f"[LAB WA] mismatch warning send failed: {e}")
-
     return {
         "ok":        True,
         "report_id": report_id,
         "status":    auto_status,
         "patient":   patient.get("name", ""),
+        "ocr_name":  (extracted or {}).get("patient_name") or "",
     }
+
+
+async def save_confirmed_whatsapp_report(pending: dict) -> dict:
+    """Save a lab report whose OCR data is already computed (post-mismatch confirmation)."""
+    patient_id    = pending["patient_id"]
+    doctor_id     = pending["doctor_id"]
+    public_url    = pending["public_url"]
+    resolved_test = pending["resolved_test"]
+    result_summary = pending.get("result_summary", "")
+    extracted_vals = pending.get("extracted_vals")
+    ocr_text      = pending.get("ocr_text")
+    auto_status   = pending.get("auto_status", "Pending Review")
+    is_pdf        = pending.get("is_pdf", True)
+    test_category = pending.get("test_category")
+    params        = pending.get("extracted_params", [])
+    report_date   = pending.get("report_date") or date.today().isoformat()
+
+    row = {
+        "patient_id":       patient_id,
+        "doctor_id":        doctor_id,
+        "report_name":      resolved_test,
+        "test_name":        resolved_test,
+        "test_category":    test_category,
+        "received_date":    date.today().isoformat(),
+        "report_source":    "whatsapp_patient",
+        "pdf_url":          public_url if is_pdf else None,
+        "image_url":        public_url if not is_pdf else None,
+        "status":           auto_status,
+        "result_summary":   result_summary or None,
+        "ocr_raw_text":     ocr_text,
+        "extracted_values": extracted_vals,
+    }
+    res = supabase.table("lab_reports").insert(row).execute()
+    if not res.data:
+        return {"ok": False, "reason": "db_insert_failed"}
+
+    report_id = res.data[0]["id"]
+
+    if params:
+        param_rows = [
+            {
+                "report_id": report_id, "patient_id": patient_id,
+                "parameter_name": p["name"], "parameter_category": p.get("category"),
+                "value": p["value"], "unit": p.get("unit"),
+                "ref_low": p.get("ref_low"), "ref_high": p.get("ref_high"),
+                "status": p.get("status", "Normal"),
+                "report_date": report_date,
+            }
+            for p in params if p.get("value") is not None
+        ]
+        if param_rows:
+            supabase.table("lab_report_values").insert(param_rows).execute()
+
+    return {"ok": True, "report_id": report_id, "status": auto_status}

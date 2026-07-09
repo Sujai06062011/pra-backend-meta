@@ -35,7 +35,7 @@ _STATE_MACHINE_STATES = {
     "awaiting_slot_confirmation", "awaiting_cancel_choice", "awaiting_cancel_selection",
     "awaiting_query_patient_select", "awaiting_query_doctor_select", "awaiting_query",
     "awaiting_prescription_patient_select",
-    "awaiting_lab_doc_confirm", "awaiting_lab_patient_select",
+    "awaiting_lab_doc_confirm", "awaiting_lab_patient_select", "awaiting_lab_mismatch_confirm",
     # multi-doctor states (dormant until feature flag = true)
     "awaiting_doctor_select",
 }
@@ -809,6 +809,8 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
         intent = "lab_doc_confirm_reply"
     elif current_state == "awaiting_lab_patient_select":
         intent = "lab_patient_selected"
+    elif current_state == "awaiting_lab_mismatch_confirm":
+        intent = "lab_mismatch_confirm_reply"
     elif current_state == "awaiting_lab_doc_category":
         intent = "lab_doc_category_reply"
     elif current_state == "awaiting_doctor_select":
@@ -2358,14 +2360,60 @@ async def handle_message(from_number: str, text: str, to_number: str, media_url:
                 print(f"[LAB WA] ingest error: {_le}")
                 _result = {"ok": False}
 
+            if _result.get("mismatch"):
+                ocr_name = _result.get("ocr_name", "someone else")
+                reply = (
+                    f"⚠️ The report appears to be for *{ocr_name}*, "
+                    f"but you selected *{selected_name}*.\n\n"
+                    f"Do you still want to tag this report to *{selected_name}*?"
+                )
+                await send_meta_buttons(
+                    from_number,
+                    reply,
+                    [{"id": "lab_mm_yes", "title": ("✅ Yes, tag to " + selected_name)[:20]},
+                     {"id": "lab_mm_no",  "title": "❌ No, cancel"}],
+                )
+                # Store pending OCR data for confirmed save
+                new_state = "awaiting_lab_mismatch_confirm"
+                temp_data = {**temp_data, "mismatch_pending": _result}
+                reply = None  # already sent via buttons
+            elif _result.get("ok"):
+                reply = (
+                    f"✅ Report received for *{selected_name}* and linked to their record.\n\n"
+                    f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
+                )
+                new_state = "idle"
+            else:
+                reply = (
+                    f"Thank you! The report for {selected_name} has been noted. "
+                    f"{doctor_name} will follow up shortly." + MENU_HINT
+                )
+                new_state = "idle"
+
+    elif intent == "lab_mismatch_confirm_reply":
+        pending = temp_data.get("mismatch_pending", {})
+        selected_name = pending.get("selected_name", "the patient")
+        tl = t.lower().strip()
+        if tl in ("lab_mm_yes", "yes", "y", "ok", "okay", "confirm"):
+            try:
+                from routers.lab_reports_router import save_confirmed_whatsapp_report
+                _result = await save_confirmed_whatsapp_report(pending)
+            except Exception as _le:
+                print(f"[LAB WA] confirmed save error: {_le}")
+                _result = {"ok": False}
             reply = (
-                f"✅ Report received for *{selected_name}* and linked to their record.\n\n"
+                f"✅ Report tagged to *{selected_name}* and linked to their record.\n\n"
                 f"{doctor_name} will review it shortly. 🏥" + MENU_HINT
             ) if _result.get("ok") else (
-                f"Thank you! The report for {selected_name} has been noted. "
+                f"Thank you! The report has been noted. "
                 f"{doctor_name} will follow up shortly." + MENU_HINT
             )
-            new_state = "idle"
+        else:
+            reply = (
+                f"No problem! The report has not been tagged. "
+                f"Please share the correct report when ready and we'll link it properly. 🙏" + MENU_HINT
+            )
+        new_state = "idle"
 
     elif intent == "lab_doc_category_reply":
         doc_url  = temp_data.get("doc_url", "")

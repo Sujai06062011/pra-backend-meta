@@ -700,7 +700,20 @@ async def meta_webhook_inbound(request: Request):
         msg = messages[0]
         from_number = msg["from"]
         msg_type = msg["type"]
+        msg_wamid = msg.get("id", "")
         clinic_number = value.get("metadata", {}).get("display_phone_number", "")
+
+        # Deduplicate: skip if we already processed this message ID
+        if msg_wamid:
+            _, _td = get_conversation_state(from_number)
+            if _td.get("last_wamid") == msg_wamid:
+                print(f"[DEDUP] skipping duplicate wamid={msg_wamid}")
+                return {"status": "ok"}
+
+        # Stamp wamid so duplicate webhook fires are ignored
+        if msg_wamid:
+            _cur_state, _cur_td = get_conversation_state(from_number)
+            upsert_conversation_state(from_number, _cur_state, {**_cur_td, "last_wamid": msg_wamid})
 
         if msg_type == "text":
             text = msg["text"]["body"].strip()
@@ -912,6 +925,12 @@ async def meta_webhook_inbound(request: Request):
                     current_state, _ = get_conversation_state(from_number)
                     if current_state != "awaiting_lab_patient_select":
                         print(f"[STALE] labpt button ignored, state={current_state}")
+                    else:
+                        await handle_inbound_message(from_number, button_id, clinic_number)
+                elif button_id in ("lab_mm_yes", "lab_mm_no"):
+                    current_state, _ = get_conversation_state(from_number)
+                    if current_state != "awaiting_lab_mismatch_confirm":
+                        print(f"[STALE] lab_mm button ignored, state={current_state}")
                     else:
                         await handle_inbound_message(from_number, button_id, clinic_number)
                 else:
