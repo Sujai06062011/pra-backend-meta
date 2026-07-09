@@ -686,10 +686,14 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
     patient_id = patient["id"]
     doctor_id  = patient["doctor_id"]
 
-    # If patient has no doctor_id, look up via the clinic's whatsapp_handler doctor
+    # If patient has no doctor_id, look up from their most recent lab order
     if not doctor_id:
-        doc_res = supabase.table("doctors").select("id").limit(1).execute()
-        doctor_id = doc_res.data[0]["id"] if doc_res.data else None
+        ord_res = supabase.table("lab_orders") \
+            .select("doctor_id") \
+            .eq("patient_id", patient_id) \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+        doctor_id = ord_res.data[0]["doctor_id"] if ord_res.data else None
 
     if not doctor_id:
         return {"ok": False, "reason": "doctor_not_found"}
