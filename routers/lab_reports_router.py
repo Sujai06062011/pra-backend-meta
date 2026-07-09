@@ -318,7 +318,7 @@ async def get_reports(
             "critical_count": critical,
         })
 
-    return {"summary": summary, "reports": reports}
+    return {"counts": {**summary, "total": len(rows)}, "reports": reports}
 
 
 # ─── GET /reports/{report_id} ────────────────────────────────────────────────
