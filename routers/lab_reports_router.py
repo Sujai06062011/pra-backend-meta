@@ -686,6 +686,14 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
     patient_id = patient["id"]
     doctor_id  = patient["doctor_id"]
 
+    # If patient has no doctor_id, look up via the clinic's whatsapp_handler doctor
+    if not doctor_id:
+        doc_res = supabase.table("doctors").select("id").limit(1).execute()
+        doctor_id = doc_res.data[0]["id"] if doc_res.data else None
+
+    if not doctor_id:
+        return {"ok": False, "reason": "doctor_not_found"}
+
     # Download document — Meta URLs require Bearer auth
     try:
         headers = {}
