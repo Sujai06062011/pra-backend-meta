@@ -149,11 +149,11 @@ async def extract_lab_values(ocr_text: str) -> dict:
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "system": _EXTRACT_SYSTEM,
                 "messages": [{
                     "role": "user",
-                    "content": f"Extract values from this lab report:\n\n{ocr_text[:8000]}",
+                    "content": f"Extract values from this lab report:\n\n{ocr_text[:12000]}",
                 }],
             },
         )
@@ -165,7 +165,21 @@ async def extract_lab_values(ocr_text: str) -> dict:
         content = content.split("```")[1]
         if content.startswith("json"):
             content = content[4:]
-    return json.loads(content)
+
+    # Repair truncated JSON: close any open array then object
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Find the last complete parameter entry and close the structure
+        last_brace = content.rfind("},")
+        if last_brace != -1:
+            content = content[:last_brace + 1] + "]}"
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # Last resort: close open array+object
+            content = content.rstrip().rstrip(",") + "]}"
+            return json.loads(content)
 
 
 def determine_report_status(parameters: list) -> str:
