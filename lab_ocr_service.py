@@ -55,21 +55,23 @@ Rules:
   Creatinine>10, Sodium<120 or >155, Potassium<2.5 or >6.5"""
 
 
-async def pdf_to_image_bytes(pdf_bytes: bytes) -> bytes:
-    """Convert first page of PDF to JPEG bytes using PyMuPDF (no system deps)."""
+async def pdf_to_images_bytes(pdf_bytes: bytes) -> list[bytes]:
+    """Convert all pages of PDF to JPEG bytes using PyMuPDF."""
     try:
         import fitz  # PyMuPDF
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(pdf_bytes)
             pdf_path = f.name
         doc = fitz.open(pdf_path)
-        page = doc[0]
         mat = fitz.Matrix(2, 2)  # 2x zoom for OCR quality
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("jpeg")
+        pages = []
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            pages.append(pix.tobytes("jpeg"))
         doc.close()
         os.unlink(pdf_path)
-        return img_bytes
+        print(f"[OCR] PDF has {len(pages)} pages")
+        return pages
     except Exception as e:
         print(f"[OCR] PDF to image failed: {e}")
         raise
@@ -97,6 +99,39 @@ async def ocr_image_bytes(image_bytes: bytes) -> str:
         return ""
     full_ann = responses[0].get("fullTextAnnotation", {})
     return full_ann.get("text", "")
+
+
+async def ocr_pdf_all_pages(pdf_bytes: bytes) -> str:
+    """OCR all pages of a PDF in batch and return concatenated text."""
+    if not VISION_API_KEY:
+        raise RuntimeError("GOOGLE_CLOUD_VISION_KEY not configured")
+
+    pages = await pdf_to_images_bytes(pdf_bytes)
+
+    # Vision API batch: up to 16 images per request
+    BATCH_SIZE = 16
+    all_text_parts = []
+
+    for batch_start in range(0, len(pages), BATCH_SIZE):
+        batch = pages[batch_start:batch_start + BATCH_SIZE]
+        requests = [
+            {
+                "image": {"content": base64.b64encode(img).decode("utf-8")},
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION", "maxResults": 1}],
+            }
+            for img in batch
+        ]
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"{VISION_URL}?key={VISION_API_KEY}", json={"requests": requests})
+            r.raise_for_status()
+            data = r.json()
+
+        for resp in data.get("responses", []):
+            text = resp.get("fullTextAnnotation", {}).get("text", "")
+            if text:
+                all_text_parts.append(text)
+
+    return "\n\n".join(all_text_parts)
 
 
 async def extract_lab_values(ocr_text: str) -> dict:
@@ -157,14 +192,11 @@ async def run_ocr_pipeline(
     auto_status = "Pending Review"
 
     try:
-        # Step 1: get image bytes
+        # Step 1 + 2: OCR (multi-page for PDFs)
         if "pdf" in mime_type.lower():
-            image_bytes = await pdf_to_image_bytes(file_bytes)
+            ocr_text = await ocr_pdf_all_pages(file_bytes)
         else:
-            image_bytes = file_bytes
-
-        # Step 2: OCR
-        ocr_text = await ocr_image_bytes(image_bytes)
+            ocr_text = await ocr_image_bytes(file_bytes)
         print(f"[OCR] extracted {len(ocr_text)} chars")
 
         if ocr_text:

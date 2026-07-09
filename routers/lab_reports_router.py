@@ -774,6 +774,30 @@ async def receive_whatsapp_report(body: WhatsAppReportBody):
         if param_rows:
             supabase.table("lab_report_values").insert(param_rows).execute()
 
+    # OCR name mismatch check
+    if extracted:
+        ocr_name = (extracted.get("patient_name") or "").strip().lower()
+        selected_name = patient.get("name", "").strip().lower()
+        # Match if any significant word (>3 chars) from OCR name appears in selected name or vice versa
+        ocr_words = {w for w in ocr_name.split() if len(w) > 3}
+        sel_words  = {w for w in selected_name.split() if len(w) > 3}
+        names_match = bool(ocr_words & sel_words) or ocr_name in selected_name or selected_name in ocr_name
+        if ocr_name and selected_name and not names_match:
+            try:
+                from main import send_meta_text
+                wa_number = body.mobile if body.mobile.startswith("91") else f"91{body.mobile}"
+                mismatch_msg = (
+                    f"⚠️ *Name mismatch detected*\n\n"
+                    f"The report you uploaded appears to be for *{extracted['patient_name']}*, "
+                    f"but you selected *{patient['name']}* as the patient.\n\n"
+                    f"The report has been saved under *{patient['name']}*. "
+                    f"If this was uploaded for the wrong patient, please contact the clinic."
+                )
+                await send_meta_text(wa_number, mismatch_msg)
+                print(f"[LAB WA] name mismatch: OCR='{ocr_name}' selected='{selected_name}'")
+            except Exception as e:
+                print(f"[LAB WA] mismatch warning send failed: {e}")
+
     return {
         "ok":        True,
         "report_id": report_id,
